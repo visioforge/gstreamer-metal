@@ -56,6 +56,12 @@
  * Asked at teardown, and true for the held frame as well -- that one is drawn
  * from the main thread, where the element cannot see it happen. */
 - (BOOL)hasRenderedFrame;
+
+/* Whether a live window is attached to exactly this handle. Lets the element
+ * skip a pointless rebuild without assuming that an unchanged handle value
+ * means an unchanged window -- an application can destroy its view and get the
+ * same address back for the next one. */
+- (BOOL)isAttachedToHandle:(guintptr)handle;
 - (void)updateDrawableSize;
 - (void)expose;
 

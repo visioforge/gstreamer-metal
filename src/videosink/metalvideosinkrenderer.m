@@ -234,8 +234,15 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 
     /* Serialises renderFrame: against itself. Rendering normally happens on one
      * streaming thread, but the frame held below is drawn from the main thread
-     * when the window finally appears, and the texture cache is not reentrant. */
+     * when the window finally appears, and the texture cache is not reentrant.
+     * Held for the whole of a render, which includes [layer nextDrawable] and
+     * can therefore take a frame interval or more. */
     NSLock *_frameLock;
+
+    /* Guards the held frame and _renderedAny only, and is never held across a
+     * render -- otherwise the streaming thread's per-frame holdFrame/discard
+     * would queue behind a main-thread redraw sitting in nextDrawable. */
+    NSLock *_heldLock;
 
     /* The most recent frame that arrived before there was a window to draw it
      * in, kept so it can be drawn as soon as there is one. Without it a pipeline
@@ -314,6 +321,7 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     _cachedDrawableSize = CGSizeZero;
     _cachedContentsScale = 1.0;
     _frameLock = [[NSLock alloc] init];
+    _heldLock = [[NSLock alloc] init];
 
     return self;
 }
@@ -381,9 +389,12 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 
     _configured = YES;
 
-    [_frameLock lock];
+    /* The held frame belongs to the caps that are being replaced: drawing it
+     * later would letterbox an old picture against the new dimensions. */
+    [_heldLock lock];
+    gst_buffer_replace (&_heldFrame, NULL);
     _renderedAny = NO;
-    [_frameLock unlock];
+    [_heldLock unlock];
 
     GST_DEBUG ("MetalVideoSinkRenderer: configured %dx%d format=%d",
                width, height, format);
@@ -481,9 +492,12 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
             view.renderer = strongSelf;
             view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
             [window.contentView addSubview:view];
-            [window makeKeyAndOrderFront:nil];
-
-            [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+            /* Deliberately not ordered front yet, and the activation policy not
+             * touched: a closeWindow landing between the two epoch checks would
+             * otherwise leave a window flashing on screen and a headless process
+             * permanently promoted to a regular app -- dock icon and menu bar --
+             * which destroying the window does not undo. Both happen after the
+             * second check, once this block knows it is still the live one. */
         }
 
         CAMetalLayer *layer = (CAMetalLayer *)view.layer;
@@ -507,6 +521,14 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
             return;
         }
 
+        /* Whatever is being replaced goes out here. show_frame reaches this
+         * method with a handle the application thread may have just changed, so
+         * a live window for the previous handle can still be standing -- and an
+         * internal NSWindow was ordered front with releasedWhenClosed = NO, so
+         * simply overwriting the ivar strands it on screen for good. */
+        NSWindow *outgoingWindow = strongSelf->_internalWindow;
+        VfMetalView *outgoingView = strongSelf->_renderView;
+
         strongSelf->_internalWindow = window;
         strongSelf->_renderView = view;
         strongSelf->_metalLayer = layer;
@@ -519,6 +541,16 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
         strongSelf->_windowPending = NO;
         strongSelf->_attachedHandle = handle;
         [strongSelf->_renderLock unlock];
+
+        if (outgoingWindow || outgoingView)
+            vf_metal_destroy_window (outgoingWindow, outgoingView);
+
+        /* Only now: this block is the live one, so showing the window and
+         * promoting the process cannot be left behind by a teardown. */
+        if (handle == 0) {
+            [window makeKeyAndOrderFront:nil];
+            [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        }
 
         /* Draw whatever arrived while there was nowhere to draw it. */
         [strongSelf drawHeldFrame];
@@ -545,10 +577,11 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 - (void)closeWindow
 {
     [_renderLock lock];
-    /* Bump the epoch even when there is no window yet. A createBlock may be
-     * sitting unrun in the main queue, and this is the only thing that stops it
-     * putting an NSWindow on screen -- and flipping the process to
-     * NSApplicationActivationPolicyRegular -- for an element already torn down. */
+    /* Bump the epoch even when there is no window yet: a createBlock may be
+     * sitting unrun in the main queue, and this is what makes it retire instead
+     * of building a window for an element already torn down. It only retires
+     * the block; showing the window and promoting the process happen after the
+     * block's second epoch check, so that they cannot be left behind. */
     ++_windowEpoch;
     _windowReady = NO;
     _windowPending = NO;
@@ -625,7 +658,10 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
         result.h = (gint)viewH;
     }
 
+    [_renderLock lock];
     _displayRect = result;
+    [_renderLock unlock];
+
     return result;
 }
 
@@ -643,8 +679,11 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 - (BOOL)renderFrameLocked:(GstVideoFrame *)frame
 {
     BOOL ok = [self renderFrameUnsafe:frame];
-    if (ok)
+    if (ok) {
+        [_heldLock lock];
         _renderedAny = YES;
+        [_heldLock unlock];
+    }
     return ok;
 }
 
@@ -862,10 +901,10 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 
 - (void)holdFrame:(GstBuffer *)buffer info:(GstVideoInfo *)info
 {
-    [_frameLock lock];
+    [_heldLock lock];
     gst_buffer_replace (&_heldFrame, buffer);
     _heldFrameInfo = *info;
-    [_frameLock unlock];
+    [_heldLock unlock];
 }
 
 - (void)drawHeldFrame
@@ -874,43 +913,54 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     GstBuffer *buffer;
     GstVideoInfo info;
 
+    /* Taken out under the short lock, and kept rather than consumed: expose has
+     * to redraw it every time the host view is resized while the pipeline sits
+     * in PAUSED. discardHeldFrame releases it -- the element calls that as soon
+     * as a real frame renders, on a caps change and again at teardown. */
+    [_heldLock lock];
+    buffer = _heldFrame ? gst_buffer_ref (_heldFrame) : NULL;
+    info = _heldFrameInfo;
+    [_heldLock unlock];
+
+    if (!buffer)
+        return;
+
     /* tryLock, not lock: this runs on the main thread, and the streaming thread
      * holds _frameLock for the whole of a render including [layer nextDrawable],
      * which blocks when the drawable pool is empty. If a real frame is being
      * drawn right now there is nothing for a redraw to add anyway. */
-    if (![_frameLock tryLock])
-        return;
-
-    /* The frame is kept, not consumed: expose has to be able to redraw it every
-     * time the host view is resized while the pipeline sits in PAUSED. It is
-     * released by discardHeldFrame, which the element calls as soon as a real
-     * frame renders and again on teardown. */
-    buffer = _heldFrame ? gst_buffer_ref (_heldFrame) : NULL;
-    info = _heldFrameInfo;
-
-    if (buffer) {
+    if ([_frameLock tryLock]) {
         if (gst_video_frame_map (&frame, &info, buffer, GST_MAP_READ)) {
             [self renderFrameLocked:&frame];
             gst_video_frame_unmap (&frame);
         }
-        gst_buffer_unref (buffer);
+        [_frameLock unlock];
     }
-    [_frameLock unlock];
+
+    gst_buffer_unref (buffer);
 }
 
 - (BOOL)hasRenderedFrame
 {
-    [_frameLock lock];
+    [_heldLock lock];
     BOOL rendered = _renderedAny;
-    [_frameLock unlock];
+    [_heldLock unlock];
     return rendered;
+}
+
+- (BOOL)isAttachedToHandle:(guintptr)handle
+{
+    [_renderLock lock];
+    BOOL attached = (_windowReady && _attachedHandle == handle);
+    [_renderLock unlock];
+    return attached;
 }
 
 - (void)discardHeldFrame
 {
-    [_frameLock lock];
+    [_heldLock lock];
     gst_buffer_replace (&_heldFrame, NULL);
-    [_frameLock unlock];
+    [_heldLock unlock];
 }
 
 - (void)expose
@@ -954,12 +1004,16 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 - (void)transformNavigationX:(gdouble)x y:(gdouble)y
                     toVideoX:(gdouble *)vx videoY:(gdouble *)vy
 {
-    if (_displayRect.w > 0 && _displayRect.h > 0 &&
-        _videoWidth > 0 && _videoHeight > 0) {
-        *vx = (x - _displayRect.x) *
-              (gdouble)_videoWidth / (gdouble)_displayRect.w;
-        *vy = (y - _displayRect.y) *
-              (gdouble)_videoHeight / (gdouble)_displayRect.h;
+    /* Snapshotted: this runs on the application thread while the rectangle is
+     * being written by whichever thread last laid a frame out, and a mouse
+     * event landing mid-write would be transformed against a mixed rectangle. */
+    [_renderLock lock];
+    GstVideoRectangle rect = _displayRect;
+    [_renderLock unlock];
+
+    if (rect.w > 0 && rect.h > 0 && _videoWidth > 0 && _videoHeight > 0) {
+        *vx = (x - rect.x) * (gdouble)_videoWidth / (gdouble)rect.w;
+        *vy = (y - rect.y) * (gdouble)_videoHeight / (gdouble)rect.h;
     } else {
         *vx = x;
         *vy = y;

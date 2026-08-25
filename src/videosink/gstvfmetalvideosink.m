@@ -310,8 +310,16 @@ gst_vf_metal_video_sink_change_state (GstElement * element,
            * thread, so the first buffer routinely beats the main queue even in
            * a perfectly healthy application -- warning then would put a line on
            * the bus at every startup. Saying it at teardown, only when nothing
-           * was ever drawn, is exact and silent when all is well. */
-          if (self->have_info && ![renderer hasRenderedFrame])
+           * was ever drawn, is exact and silent when all is well.
+           *
+           * Gated on the deadline being armed, not merely on nothing having
+           * been drawn: the deadline is set only when a frame arrived and found
+           * no window, and cleared the moment one renders. Without that gate the
+           * warning also fires when the pipeline is simply stopped during
+           * preroll -- Ctrl-C on gst-launch, a preview cancelled -- and asserts
+           * a cause that is then untrue. */
+          if (GST_CLOCK_TIME_IS_VALID (self->window_deadline)
+              && ![renderer hasRenderedFrame])
             GST_ELEMENT_WARNING (self, RESOURCE, NOT_FOUND,
                 ("No video frame was ever displayed."),
                 ("The Metal render window never appeared, so every frame was "
@@ -425,9 +433,6 @@ gst_vf_metal_video_sink_set_window_handle (GstVideoOverlay * overlay,
 
   GST_DEBUG_OBJECT (self, "set_window_handle: %p", (void *)handle);
 
-  if (self->window_handle == handle)
-    return;
-
   self->window_handle = handle;
   /* A fresh handle gets a fresh grace period before the pipeline is failed. */
   GST_OBJECT_LOCK (self);
@@ -442,8 +447,14 @@ gst_vf_metal_video_sink_set_window_handle (GstVideoOverlay * overlay,
       /* GstVideoOverlay lets the application move the sink to a different
        * window whenever it likes, so tear the current one down first --
        * otherwise ensureWindowWithHandle: sees a window it already has and
-       * keeps rendering into the old view. A no-op when there is none. */
-      [renderer closeWindow];
+       * keeps rendering into the old view. A no-op when there is none.
+       *
+       * Asked of the renderer rather than compared against the previous handle
+       * value: an application that destroys its view and creates another can be
+       * handed the same address back, and skipping on that would leave the sink
+       * drawing into a view whose parent is gone. */
+      if (![renderer isAttachedToHandle:handle])
+        [renderer closeWindow];
 
       if (handle != 0
           && ![renderer ensureWindowWithHandle:handle
