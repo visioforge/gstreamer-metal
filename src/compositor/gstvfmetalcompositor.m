@@ -174,8 +174,15 @@ G_DEFINE_TYPE_WITH_CODE (GstVfMetalCompositor, gst_vf_metal_compositor,
     G_IMPLEMENT_INTERFACE (GST_TYPE_CHILD_PROXY,
         gst_vf_metal_compositor_child_proxy_init));
 
+/* Rank NONE is required, not a preference.  ges_get_compositor_factory() does
+ * not build the GES timeline mixer by name -- it takes the highest-ranked
+ * factory whose klass contains "Compositor", and this element declares
+ * Filter/Editor/Video/Compositor.  Any rank above the software compositor
+ * silently makes it the mixer of every GES timeline.  Everything that wants
+ * this element asks for it by name through gst_element_factory_make(), which
+ * ignores the rank, so nothing is lost. */
 GST_ELEMENT_REGISTER_DEFINE (vfmetalcompositor, "vfmetalcompositor",
-    GST_RANK_PRIMARY + 2, GST_TYPE_VF_METAL_COMPOSITOR);
+    GST_RANK_NONE, GST_TYPE_VF_METAL_COMPOSITOR);
 
 /* --- Geometry helpers (ported from original compositor) --- */
 
@@ -386,75 +393,21 @@ _should_draw_background (GstVideoAggregator * vagg)
 
 /* --- Caps negotiation --- */
 
-/* Override update_caps so that sink pads accept any input dimensions.
- * The default GstVideoAggregator implementation intersects all sink pad caps,
- * which forces all inputs to have the same width/height.  A compositor must
- * allow heterogeneous input sizes because it scales/positions each stream
- * independently via its pad properties (xpos, ypos, width, height). */
+/* GstVideoAggregator asks here what the src caps may be.  Both the output size
+ * and the output format are decided in _fixate_caps, so this must leave them
+ * open: pinning width and height to the geometry of the inputs makes the
+ * intersection with any downstream that wants a different size EMPTY, and
+ * negotiation then fails with not-negotiated -- even though the compositor
+ * scales and positions every input anyway.  The software compositor leaves them
+ * open for the same reason.  The override is kept rather than dropped so that
+ * the default implementation's format preference, which it derives from the
+ * inputs, does not displace the BGRA that _fixate_caps chooses. */
 static GstCaps *
 _update_caps (GstVideoAggregator * vagg, GstCaps * caps)
 {
-  GList *l;
-  gint best_width = -1, best_height = -1;
-  GstCaps *ret;
+  GST_DEBUG_OBJECT (vagg, "update_caps: %" GST_PTR_FORMAT, caps);
 
-  GST_OBJECT_LOCK (vagg);
-  for (l = GST_ELEMENT (vagg)->sinkpads; l; l = l->next) {
-    GstVideoAggregatorPad *vaggpad = l->data;
-    GstVfMetalCompositorPad *cpad = GST_VF_METAL_COMPOSITOR_PAD (vaggpad);
-    gint this_width, this_height;
-
-    if (!vaggpad->info.finfo
-        || gst_aggregator_pad_is_inactive (GST_AGGREGATOR_PAD (vaggpad)))
-      continue;
-
-    /* Use configured pad output dimensions or input dimensions */
-    this_width = cpad->width > 0
-        ? cpad->width : GST_VIDEO_INFO_WIDTH (&vaggpad->info);
-    this_height = cpad->height > 0
-        ? cpad->height : GST_VIDEO_INFO_HEIGHT (&vaggpad->info);
-
-    this_width += MAX (cpad->xpos, 0);
-    this_height += MAX (cpad->ypos, 0);
-
-    if (best_width < this_width)
-      best_width = this_width;
-    if (best_height < this_height)
-      best_height = this_height;
-  }
-  GST_OBJECT_UNLOCK (vagg);
-
-  if (best_width <= 0 || best_height <= 0) {
-    /* No valid pads yet — return template caps with ranges */
-    return gst_caps_ref (caps);
-  }
-
-  /* Build output caps with the computed dimensions and all supported formats.
-   * Do not force BGRA even when inputs have alpha — the compositor renders
-   * internally to BGRA and converts to the negotiated output format via
-   * compute shaders, so any supported output format is valid.  Format
-   * preference (BGRA) is handled in _fixate_caps instead. */
-  ret = gst_caps_new_simple ("video/x-raw",
-      "width", G_TYPE_INT, best_width,
-      "height", G_TYPE_INT, best_height, NULL);
-  {
-    GstCaps *template_caps = gst_static_pad_template_get_caps (&src_factory);
-    GstCaps *tmp = gst_caps_intersect (ret, template_caps);
-    gst_caps_unref (ret);
-    gst_caps_unref (template_caps);
-    ret = tmp;
-  }
-
-  /* Intersect with downstream caps to ensure we're a valid subset */
-  if (caps) {
-    GstCaps *tmp = gst_caps_intersect (ret, caps);
-    gst_caps_unref (ret);
-    ret = tmp;
-  }
-
-  GST_DEBUG_OBJECT (vagg, "update_caps: %" GST_PTR_FORMAT, ret);
-
-  return ret;
+  return gst_caps_ref (caps);
 }
 
 static GstCaps *

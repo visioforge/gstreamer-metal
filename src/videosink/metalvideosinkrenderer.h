@@ -35,13 +35,34 @@
 - (BOOL)configureWithVideoInfo:(GstVideoInfo *)info;
 
 /* Window management */
-- (void)ensureWindowWithHandle:(guintptr)handle
-                         width:(int)width
-                        height:(int)height;
+/* What ensureWindowWithWidth:height: has to say about the render window. */
+typedef NS_ENUM (NSInteger, VfMetalWindowState) {
+    VF_METAL_WINDOW_READY,      /* draw into it now */
+    VF_METAL_WINDOW_PENDING,    /* being built on the main thread; hold the frame */
+    VF_METAL_WINDOW_DETACHED,   /* the application took its view away */
+};
+
+/* Window management. Never blocks: creation is queued on the main thread, so
+ * PENDING means "not yet" and the caller should hold the frame and ask again. */
+- (void)setWindowHandle:(guintptr)handle width:(int)width height:(int)height;
+- (VfMetalWindowState)ensureWindowWithWidth:(int)width height:(int)height;
+- (BOOL)hasWindowHandle;
 - (void)closeWindow;
 
 /* Rendering */
 - (BOOL)renderFrame:(GstVideoFrame *)frame;
+
+/* Keeps a frame that arrived before there was a window, so it can be drawn as
+ * soon as one exists. Without it a pipeline that prerolls and stays in PAUSED
+ * shows an empty window. */
+- (void)holdFrame:(GstBuffer *)buffer info:(GstVideoInfo *)info;
+- (void)discardHeldFrame;
+
+/* Whether any frame has reached the screen since the last configureWithVideoInfo:.
+ * Asked at teardown, and true for the held frame as well -- that one is drawn
+ * from the main thread, where the element cannot see it happen. */
+- (BOOL)hasRenderedFrame;
+
 - (void)updateDrawableSize;
 - (void)expose;
 

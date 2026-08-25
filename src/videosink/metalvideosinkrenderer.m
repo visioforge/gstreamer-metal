@@ -136,6 +136,29 @@ fragment float4 videosinkFragmentI420(
 
 @end
 
+/* Destroys a window and view the caller already owns -- it takes no lock and
+ * touches no ivar, so both the teardown path and a create block that lost its
+ * race can call it without one thread being able to see half a window. Main
+ * thread only. */
+static void
+vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
+{
+    /* Suppress window transition animations to prevent autoreleased
+     * _NSWindowTransformAnimation objects from outliving the window. */
+    [window setAnimationBehavior:NSWindowAnimationBehaviorNone];
+
+    /* Drain animation objects inside this pool while the window hierarchy is
+     * still alive, so their dealloc can't hit freed memory. */
+    @autoreleasepool {
+        [window orderOut:nil];
+
+        [view.layer removeAllAnimations];
+        [view removeFromSuperview];
+    }
+
+    [window close];
+}
+
 #endif /* !TARGET_OS_IPHONE */
 
 /* ============================================================= */
@@ -174,13 +197,48 @@ fragment float4 videosinkFragmentI420(
     /* Thread safety: protects _windowReady, _metalLayer access across threads */
     NSLock *_renderLock;
 
+    /* Serialises rendering, and keeps a caps change out of one. Held for the
+     * whole of a render, so it can be held for a frame interval or more. */
+    NSLock *_frameLock;
+
+    /* Guards the held frame and _renderedAny. Never held across a render, so
+     * the streaming thread's per-frame hold does not queue behind a redraw. */
+    NSLock *_heldLock;
+
+    /* Whatever is on screen, or would be if there were a window yet. A pipeline
+     * that prerolls and stays in PAUSED gets one frame; without this it is lost
+     * and the window stays empty, and expose has nothing to redraw. */
+    GstBuffer *_heldFrame;
+    GstVideoInfo _heldFrameInfo;
+
+    /* Whether anything has reached the screen. Lives here, not in the element,
+     * because the held frame is drawn from the main thread. Cleared by
+     * closeWindow, which the element calls only after it has asked. */
+    BOOL _renderedAny;
+
     /* Cached view properties (updated on main thread only, read under lock) */
     CGSize _cachedDrawableSize;
     CGFloat _cachedContentsScale;
 
     /* State */
     BOOL _windowReady;
+    BOOL _windowPending;
     BOOL _configured;
+
+    /* What the application last asked for, what the queued block is building
+     * for, and what the live window belongs to. The first is the truth: a
+     * pending handle that differs from it is stale by definition. */
+    guintptr _requestedHandle;
+    BOOL _handleWasSet;
+    guintptr _pendingHandle;
+    guintptr _attachedHandle;
+
+    /* Bumped under _renderLock on every window transition. A block dispatched
+     * to the main queue captures the value it was dispatched with and does
+     * nothing if it no longer matches, so a queue that is only serviced much
+     * later cannot create a window for an element that has since been torn
+     * down, nor close one that has since been recreated. */
+    NSUInteger _windowEpoch;
 }
 
 - (instancetype)init
@@ -221,6 +279,8 @@ fragment float4 videosinkFragmentI420(
     _configured = NO;
     _cachedDrawableSize = CGSizeZero;
     _cachedContentsScale = 1.0;
+    _frameLock = [[NSLock alloc] init];
+    _heldLock = [[NSLock alloc] init];
 
     return self;
 }
@@ -255,6 +315,7 @@ fragment float4 videosinkFragmentI420(
     int width = GST_VIDEO_INFO_WIDTH (info);
     int height = GST_VIDEO_INFO_HEIGHT (info);
     GstVideoFormat format = GST_VIDEO_INFO_FORMAT (info);
+    BOOL ok;
 
     /* Skip if nothing changed */
     if (_configured && _videoWidth == width && _videoHeight == height &&
@@ -262,6 +323,23 @@ fragment float4 videosinkFragmentI420(
         return YES;
     }
 
+    /* Under _frameLock for the whole mutation. These fields used to be written
+     * and read on one thread -- set_caps and rendering are both the streaming
+     * thread -- but the held frame and expose now draw from the main thread, and
+     * a caps change landing mid-draw would lay an old picture out against the
+     * new dimensions. Taking the render lock here means no draw is in flight. */
+    [_frameLock lock];
+    ok = [self configureLocked:info width:width height:height format:format];
+    [_frameLock unlock];
+
+    return ok;
+}
+
+- (BOOL)configureLocked:(GstVideoInfo *)info
+                  width:(int)width
+                 height:(int)height
+                 format:(GstVideoFormat)format
+{
     _videoWidth = width;
     _videoHeight = height;
     _videoFormat = format;
@@ -288,6 +366,13 @@ fragment float4 videosinkFragmentI420(
 
     _configured = YES;
 
+    /* The held frame belongs to the caps that are being replaced: drawing it
+     * later would letterbox an old picture against the new dimensions. */
+    [_heldLock lock];
+    gst_buffer_replace (&_heldFrame, NULL);
+    _renderedAny = NO;
+    [_heldLock unlock];
+
     GST_DEBUG ("MetalVideoSinkRenderer: configured %dx%d format=%d",
                width, height, format);
 
@@ -296,30 +381,115 @@ fragment float4 videosinkFragmentI420(
 
 /* --- Window management --- */
 
-- (void)ensureWindowWithHandle:(guintptr)handle
-                         width:(int)width
-                        height:(int)height
+/* Never blocks.  The streaming thread calls this once per frame; it returns NO
+ * until the window exists, and the caller drops the frame and tries again.
+ * Waiting here is what wedged headless processes, and it deadlocks an AppKit
+ * host too: a main thread sitting in gst_element_get_state() while the sink
+ * prerolls is the very thread that has to build the window.  Dispatching and
+ * returning lets preroll finish, which releases that thread, which then runs
+ * the block. */
+- (void)setWindowHandle:(guintptr)handle width:(int)width height:(int)height
 {
-    if (_windowReady)
-        return;
+    BOOL sameAsLive;
+
+    [_renderLock lock];
+    sameAsLive = (_windowReady && _attachedHandle == handle);
+    _requestedHandle = handle;
+    _handleWasSet = YES;
+    [_renderLock unlock];
+
+    /* 0 always closes: in internal-window mode _attachedHandle is 0 as well, so
+     * "are we attached to 0" answers yes, and a detach would otherwise leave the
+     * standalone window frozen on screen for good. */
+    if (handle == 0 || !sameAsLive)
+        [self closeWindow];
+
+    if (handle != 0)
+        [self ensureWindowWithWidth:width height:height];
+}
+
+- (BOOL)hasWindowHandle
+{
+    [_renderLock lock];
+    BOOL have = (_requestedHandle != 0);
+    [_renderLock unlock];
+    return have;
+}
+
+- (VfMetalWindowState)ensureWindowWithWidth:(int)width height:(int)height
+{
+    guintptr handle;
+
+    [_renderLock lock];
+    handle = _requestedHandle;
+
+    if (handle == 0 && _handleWasSet) {
+        /* The application took its view away. Building an internal window here
+         * is not what a detach asks for. */
+        [_renderLock unlock];
+        return VF_METAL_WINDOW_DETACHED;
+    }
+    if (_windowReady && _attachedHandle == handle) {
+        [_renderLock unlock];
+        return VF_METAL_WINDOW_READY;
+    }
+    if (_windowPending && _pendingHandle == handle) {
+        /* Already queued for this handle. A second block would add a second
+         * view to the same parent and orphan the first. */
+        [_renderLock unlock];
+        return VF_METAL_WINDOW_PENDING;
+    }
+    /* Either nothing is queued, or what is queued is for a handle that is no
+     * longer the one wanted -- bumping the epoch retires it. */
+    _windowPending = YES;
+    _pendingHandle = handle;
+    NSUInteger epoch = ++_windowEpoch;
+    [_renderLock unlock];
 
 #if !TARGET_OS_IPHONE
+    __weak MetalVideoSinkRenderer *weakSelf = self;
+
+    /* The window is built into locals with no lock held, and every ivar is then
+     * assigned in one locked step at the end.  Holding the lock across AppKit
+     * would be the safer-looking shape and is the more dangerous one: it is not
+     * recursive, and anything AppKit does that drains the main queue would
+     * deadlock the main thread against itself -- the exact failure this element
+     * is being fixed for. */
     void (^createBlock)(void) = ^{
+        /* Weak: in a process that never drains its main queue this block is
+         * never run and never released, and a strong reference would keep a
+         * whole renderer -- Metal device, texture cache, pipeline states --
+         * alive for the life of the process, once per PLAYING cycle. */
+        MetalVideoSinkRenderer *strongSelf = weakSelf;
+        if (!strongSelf)
+            return;
+
+        [strongSelf->_renderLock lock];
+        if (strongSelf->_windowEpoch != epoch) {
+            /* Retired. _windowPending is not cleared here: it belongs to
+             * whatever superseded this block, and clearing it would make the
+             * next frame queue a redundant third one. */
+            [strongSelf->_renderLock unlock];
+            return;
+        }
+        [strongSelf->_renderLock unlock];
+
+        NSWindow *window = nil;
+        VfMetalView *view = nil;
+
         if (handle != 0) {
             /* External mode: embed in provided NSView */
             NSView *parentView = (__bridge NSView *)(void *)handle;
-            self->_renderView =
-                [[VfMetalView alloc] initWithFrame:parentView.bounds];
-            self->_renderView.renderer = self;
-            self->_renderView.autoresizingMask =
-                NSViewWidthSizable | NSViewHeightSizable;
-            [parentView addSubview:self->_renderView];
+            view = [[VfMetalView alloc] initWithFrame:parentView.bounds];
+            view.renderer = strongSelf;
+            view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            [parentView addSubview:view];
         } else {
             /* Internal mode: create NSWindow */
             [NSApplication sharedApplication];
 
             NSRect frame = NSMakeRect(100, 100, width, height);
-            self->_internalWindow = [[NSWindow alloc]
+            window = [[NSWindow alloc]
                 initWithContentRect:frame
                           styleMask:NSWindowStyleMaskTitled |
                                     NSWindowStyleMaskClosable |
@@ -327,113 +497,165 @@ fragment float4 videosinkFragmentI420(
                                     NSWindowStyleMaskMiniaturizable
                             backing:NSBackingStoreBuffered
                               defer:NO];
-            self->_internalWindow.title = @"VF Metal Video Sink";
-            self->_internalWindow.releasedWhenClosed = NO;
+            window.title = @"VF Metal Video Sink";
+            window.releasedWhenClosed = NO;
 
-            self->_renderView =
-                [[VfMetalView alloc]
-                    initWithFrame:self->_internalWindow.contentView.bounds];
-            self->_renderView.renderer = self;
-            self->_renderView.autoresizingMask =
-                NSViewWidthSizable | NSViewHeightSizable;
-            [self->_internalWindow.contentView addSubview:self->_renderView];
-            [self->_internalWindow makeKeyAndOrderFront:nil];
+            view = [[VfMetalView alloc]
+                initWithFrame:window.contentView.bounds];
+            view.renderer = strongSelf;
+            view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            [window.contentView addSubview:view];
+            /* Deliberately not ordered front yet, and the activation policy not
+             * touched: a closeWindow landing between the two epoch checks would
+             * otherwise leave a window flashing on screen and a headless process
+             * permanently promoted to a regular app -- dock icon and menu bar --
+             * which destroying the window does not undo. Both happen after the
+             * second check, once this block knows it is still the live one. */
+        }
 
+        CAMetalLayer *layer = (CAMetalLayer *)view.layer;
+
+        CGFloat scale = view.window.backingScaleFactor;
+        if (scale <= 0) scale = 1.0;
+        layer.contentsScale = scale;
+
+        CGSize boundsSize = view.bounds.size;
+        CGSize drawableSize = CGSizeMake(
+            boundsSize.width * scale, boundsSize.height * scale);
+        layer.drawableSize = drawableSize;
+
+        [strongSelf->_renderLock lock];
+        if (strongSelf->_windowEpoch != epoch) {
+            /* Torn down while this was building. Nothing was published, so this
+             * block still owns what it made and has to undo it. _windowPending
+             * is left to whatever superseded it. */
+            [strongSelf->_renderLock unlock];
+            vf_metal_destroy_window (window, view);
+            return;
+        }
+
+        /* Whatever is being replaced goes out here. show_frame reaches this
+         * method with a handle the application thread may have just changed, so
+         * a live window for the previous handle can still be standing -- and an
+         * internal NSWindow was ordered front with releasedWhenClosed = NO, so
+         * simply overwriting the ivar strands it on screen for good. */
+        NSWindow *outgoingWindow = strongSelf->_internalWindow;
+        VfMetalView *outgoingView = strongSelf->_renderView;
+
+        strongSelf->_internalWindow = window;
+        strongSelf->_renderView = view;
+        strongSelf->_metalLayer = layer;
+        strongSelf->_cachedContentsScale = scale;
+        strongSelf->_cachedDrawableSize = drawableSize;
+
+        /* Published at the point the window actually exists: "there is a
+         * window" and "_windowReady" are one fact. */
+        strongSelf->_windowReady = YES;
+        strongSelf->_windowPending = NO;
+        strongSelf->_attachedHandle = handle;
+        [strongSelf->_renderLock unlock];
+
+        if (outgoingWindow || outgoingView)
+            vf_metal_destroy_window (outgoingWindow, outgoingView);
+
+        /* Only now: this block is the live one, so showing the window and
+         * promoting the process cannot be left behind by a teardown. */
+        if (handle == 0) {
+            [window makeKeyAndOrderFront:nil];
             [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         }
 
-        self->_metalLayer = (CAMetalLayer *)self->_renderView.layer;
-
-        /* Cache view properties for thread-safe access from renderFrame.
-         * These must only be read/written from the main thread. */
-        CGFloat scale = self->_renderView.window.backingScaleFactor;
-        if (scale <= 0) scale = 1.0;
-        self->_cachedContentsScale = scale;
-        self->_metalLayer.contentsScale = scale;
-
-        CGSize boundsSize = self->_renderView.bounds.size;
-        self->_cachedDrawableSize = CGSizeMake(
-            boundsSize.width * scale, boundsSize.height * scale);
-        self->_metalLayer.drawableSize = self->_cachedDrawableSize;
+        /* Draw whatever arrived while there was nowhere to draw it. */
+        [strongSelf drawHeldFrame];
     };
 
-    if ([NSThread isMainThread]) {
-        createBlock();
-    } else {
-        /* All AppKit operations must happen on the main thread.
-         * Use dispatch_sync to ensure the window is ready before returning. */
-        dispatch_sync (dispatch_get_main_queue (), createBlock);
-    }
+    if ([NSThread isMainThread])
+        createBlock ();
+    else
+        dispatch_async (dispatch_get_main_queue (), createBlock);
+#else
+    [_renderLock lock];
+    _windowReady = YES;
+    _windowPending = NO;
+    _attachedHandle = handle;
+    [_renderLock unlock];
 #endif /* !TARGET_OS_IPHONE */
 
     [_renderLock lock];
-    _windowReady = YES;
+    BOOL ready = (_windowReady && _attachedHandle == handle);
     [_renderLock unlock];
+    return ready ? VF_METAL_WINDOW_READY : VF_METAL_WINDOW_PENDING;
 }
 
 - (void)closeWindow
 {
-    /* Mark as not ready first (under lock) to prevent new renders */
     [_renderLock lock];
-    if (!_windowReady) {
-        [_renderLock unlock];
-        return;
-    }
+    /* Bump the epoch even when there is no window yet: a createBlock may be
+     * sitting unrun in the main queue, and this is what makes it retire instead
+     * of building a window for an element already torn down. It only retires
+     * the block; showing the window and promoting the process happen after the
+     * block's second epoch check, so that they cannot be left behind. */
+    ++_windowEpoch;
     _windowReady = NO;
-    _metalLayer = nil;  /* Nil under lock so renderFrame can't grab it */
+    _windowPending = NO;
+    _attachedHandle = 0;
+    _pendingHandle = 0;
+    _cachedDrawableSize = CGSizeZero;
+    _metalLayer = nil;
+#if !TARGET_OS_IPHONE
+    /* Taken out of the ivars here rather than read from them inside the block:
+     * the block then owns what it destroys, so it needs no staleness check and
+     * cannot tear down a window that was recreated behind it. */
+    NSWindow *window = _internalWindow;
+    VfMetalView *view = _renderView;
+    _internalWindow = nil;
+    _renderView = nil;
+#endif
     [_renderLock unlock];
 
+    /* A window that goes takes "something was displayed" with it: the next one
+     * starts having shown nothing. Under _heldLock, which owns this field, and
+     * safe here because the element asks before it closes. */
+    [_heldLock lock];
+    _renderedAny = NO;
+    [_heldLock unlock];
+
 #if !TARGET_OS_IPHONE
-    void (^closeBlock)(void) = ^{
-        /* Suppress window transition animations to prevent autoreleased
-         * _NSWindowTransformAnimation objects from outliving the window. */
-        if (self->_internalWindow) {
-            [self->_internalWindow setAnimationBehavior:NSWindowAnimationBehaviorNone];
-        }
+    if (!window && !view)
+        return;
 
-        /* Drain animation objects inside this pool while the window
-         * hierarchy is still alive, so their dealloc can't hit freed memory. */
-        @autoreleasepool {
-            if (self->_internalWindow) {
-                [self->_internalWindow orderOut:nil];
-            }
-
-            if (self->_renderView) {
-                [self->_renderView.layer removeAllAnimations];
-                [self->_renderView removeFromSuperview];
-            }
-        }
-
-        /* Now safe to release — all autoreleased animation objects are gone */
-        self->_renderView = nil;
-
-        if (self->_internalWindow) {
-            [self->_internalWindow close];
-            self->_internalWindow = nil;
-        }
-    };
-
-    if ([NSThread isMainThread]) {
-        closeBlock();
-    } else {
-        dispatch_sync (dispatch_get_main_queue (), closeBlock);
-    }
+    /* Not waited on. The block owns the window and the view outright -- they
+     * came out of the ivars above -- and touches nothing else, so there is
+     * nothing for teardown to wait for. */
+    if ([NSThread isMainThread])
+        vf_metal_destroy_window (window, view);
+    else
+        dispatch_async (dispatch_get_main_queue (), ^{
+            vf_metal_destroy_window (window, view);
+        });
 #endif /* !TARGET_OS_IPHONE */
 }
 
 /* --- Display rectangle calculation --- */
 
-- (GstVideoRectangle)computeDisplayRect
+/* Takes the drawable size rather than reading _cachedDrawableSize: renderFrame
+ * snapshots that under the lock and divides by the snapshot to reach NDC, so
+ * reading the ivar again here would let a resize land in between and compute
+ * the rectangle against one size and the projection against another -- a frame
+ * offset or stretched for as long as the resize lasts. */
+- (GstVideoRectangle)computeDisplayRectForDrawableSize:(CGSize)drawableSize
+                                            renderRect:(GstVideoRectangle)renderRect
+                                        haveRenderRect:(BOOL)haveRenderRect
 {
     GstVideoRectangle result;
     CGFloat viewW, viewH;
 
-    if (_haveRenderRect) {
-        viewW = _renderRect.w;
-        viewH = _renderRect.h;
-    } else if (_cachedDrawableSize.width > 0 && _cachedDrawableSize.height > 0) {
-        viewW = _cachedDrawableSize.width;
-        viewH = _cachedDrawableSize.height;
+    if (haveRenderRect) {
+        viewW = renderRect.w;
+        viewH = renderRect.h;
+    } else if (drawableSize.width > 0 && drawableSize.height > 0) {
+        viewW = drawableSize.width;
+        viewH = drawableSize.height;
     } else {
         viewW = _videoWidth;
         viewH = _videoHeight;
@@ -457,13 +679,36 @@ fragment float4 videosinkFragmentI420(
         result.h = (gint)viewH;
     }
 
+    [_renderLock lock];
     _displayRect = result;
+    [_renderLock unlock];
+
     return result;
 }
 
 /* --- Rendering --- */
 
 - (BOOL)renderFrame:(GstVideoFrame *)frame
+{
+    [_frameLock lock];
+    BOOL ok = [self renderFrameLocked:frame];
+    [_frameLock unlock];
+    return ok;
+}
+
+/* Callers hold _frameLock. */
+- (BOOL)renderFrameLocked:(GstVideoFrame *)frame
+{
+    BOOL ok = [self renderFrameUnsafe:frame];
+    if (ok) {
+        [_heldLock lock];
+        _renderedAny = YES;
+        [_heldLock unlock];
+    }
+    return ok;
+}
+
+- (BOOL)renderFrameUnsafe:(GstVideoFrame *)frame
 {
     [_renderLock lock];
     if (!_windowReady || !_metalLayer || !_configured) {
@@ -474,6 +719,8 @@ fragment float4 videosinkFragmentI420(
     /* Grab local references under lock so closeWindow can't nil them mid-render */
     CAMetalLayer *metalLayer = _metalLayer;
     CGSize drawableSize = _cachedDrawableSize;
+    BOOL haveRenderRect = _haveRenderRect;
+    GstVideoRectangle renderRect = _renderRect;
     [_renderLock unlock];
 
     if (drawableSize.width <= 0 || drawableSize.height <= 0)
@@ -537,8 +784,12 @@ fragment float4 videosinkFragmentI420(
             return NO;
         }
 
-        /* Compute display rectangle for aspect ratio */
-        GstVideoRectangle displayRect = [self computeDisplayRect];
+        /* Compute display rectangle for aspect ratio, from the same snapshot
+         * drawW/drawH came from. */
+        GstVideoRectangle displayRect =
+            [self computeDisplayRectForDrawableSize:drawableSize
+                                         renderRect:renderRect
+                                     haveRenderRect:haveRenderRect];
 
         /* Map display rect to NDC coordinates [-1, 1] */
         float x = (2.0f * displayRect.x / drawW) - 1.0f;
@@ -625,24 +876,56 @@ fragment float4 videosinkFragmentI420(
 - (void)updateDrawableSize
 {
 #if !TARGET_OS_IPHONE
-    if (!_renderView)
+    /* Called from the streaming thread, while closeWindow nils these two on the
+     * main thread. Assigning a strong ivar releases what it held, so reading
+     * one unlocked from another thread can hand back a pointer that is freed a
+     * moment later. Take strong local references under the lock and let the
+     * block work from those. */
+    [_renderLock lock];
+    BOOL haveWindow = (_renderView != nil && _metalLayer != nil);
+    [_renderLock unlock];
+
+    if (!haveWindow)
         return;
 
+    /* Weak, and nothing else captured: this is dispatched once per frame, so a
+     * main thread stuck in a modal loop queues hundreds of these. Capturing the
+     * view or the layer as locals would keep them alive past closeWindow and
+     * past the element's finalize just as surely as capturing self would, so the
+     * block re-reads both under the lock instead. */
+    __weak MetalVideoSinkRenderer *weakSelf = self;
+
     void (^updateBlock)(void) = ^{
-        CGSize boundsSize = self->_renderView.bounds.size;
-        CGFloat scale = self->_renderView.window.backingScaleFactor;
+        MetalVideoSinkRenderer *self = weakSelf;
+        if (!self)
+            return;
+
+        [self->_renderLock lock];
+        VfMetalView *view = self->_renderView;
+        CAMetalLayer *layer = self->_metalLayer;
+        [self->_renderLock unlock];
+
+        if (!view || !layer)
+            return;
+
+        CGSize boundsSize = view.bounds.size;
+        CGFloat scale = view.window.backingScaleFactor;
         if (scale <= 0) scale = 1.0;
 
         CGSize newSize = CGSizeMake(
             boundsSize.width * scale, boundsSize.height * scale);
 
         if (newSize.width > 0 && newSize.height > 0) {
-            self->_metalLayer.drawableSize = newSize;
-            self->_metalLayer.contentsScale = scale;
+            layer.drawableSize = newSize;
+            layer.contentsScale = scale;
 
             [self->_renderLock lock];
-            self->_cachedDrawableSize = newSize;
-            self->_cachedContentsScale = scale;
+            /* Only if this is still the layer being rendered into: the window
+             * may have been closed or replaced while this block was queued. */
+            if (self->_metalLayer == layer) {
+                self->_cachedDrawableSize = newSize;
+                self->_cachedContentsScale = scale;
+            }
             [self->_renderLock unlock];
         }
     };
@@ -655,11 +938,90 @@ fragment float4 videosinkFragmentI420(
 #endif
 }
 
+- (void)holdFrame:(GstBuffer *)buffer info:(GstVideoInfo *)info
+{
+    [_heldLock lock];
+    gst_buffer_replace (&_heldFrame, buffer);
+    _heldFrameInfo = *info;
+    [_heldLock unlock];
+}
+
+- (void)drawHeldFrame
+{
+    [self drawHeldFrameRetrying:YES];
+}
+
+- (void)drawHeldFrameRetrying:(BOOL)allowRetry
+{
+    GstVideoFrame frame;
+    GstBuffer *buffer;
+    GstVideoInfo info;
+    BOOL drawn = NO;
+
+    /* tryLock, not lock: this runs on the main thread, and the streaming thread
+     * holds _frameLock for the whole of a render including [layer nextDrawable],
+     * which blocks when the drawable pool is empty. If a real frame is being
+     * drawn right now there is nothing for a redraw to add anyway.
+     *
+     * Taken FIRST, before the held frame is read: _frameLock is what keeps a
+     * caps change out, and reading the buffer before taking it would let
+     * configureWithVideoInfo: swap the dimensions underneath -- the old picture
+     * would then be laid out against the new ones. */
+    if (![_frameLock tryLock])
+        return;
+
+    /* Kept rather than consumed: the held frame is whatever is on screen, so
+     * expose can redraw it whenever the host view is resized. discardHeldFrame
+     * releases it -- on a caps change and at teardown. */
+    [_heldLock lock];
+    buffer = _heldFrame ? gst_buffer_ref (_heldFrame) : NULL;
+    info = _heldFrameInfo;
+    [_heldLock unlock];
+
+    if (buffer) {
+        if (gst_video_frame_map (&frame, &info, buffer, GST_MAP_READ)) {
+            drawn = [self renderFrameLocked:&frame];
+            gst_video_frame_unmap (&frame);
+        }
+        gst_buffer_unref (buffer);
+    }
+
+    [_frameLock unlock];
+
+    if (!buffer)
+        return;
+
+    /* nextDrawable can transiently return nil on a layer that has only just been
+     * created. For a pipeline that prerolls and stays in PAUSED this is the only
+     * draw there will ever be, and losing it leaves a black window and a
+     * teardown warning blaming a window that did exist. One retry, next turn. */
+    if (!drawn && allowRetry) {
+        __weak MetalVideoSinkRenderer *weakSelf = self;
+        dispatch_async (dispatch_get_main_queue (), ^{
+            [weakSelf drawHeldFrameRetrying:NO];
+        });
+    }
+}
+
+- (BOOL)hasRenderedFrame
+{
+    [_heldLock lock];
+    BOOL rendered = _renderedAny;
+    [_heldLock unlock];
+    return rendered;
+}
+
+- (void)discardHeldFrame
+{
+    [_heldLock lock];
+    gst_buffer_replace (&_heldFrame, NULL);
+    [_heldLock unlock];
+}
+
 - (void)expose
 {
-    /* Request a redraw. For now this is a no-op since we don't cache
-     * the last frame. The element can re-render via gst_base_sink_get_last_sample()
-     * if needed in the future. */
+    /* The held frame is the one on screen, so this is a genuine redraw. */
+    [self drawHeldFrame];
 }
 
 /* --- Properties --- */
@@ -672,11 +1034,17 @@ fragment float4 videosinkFragmentI420(
 - (void)setRenderRectangleX:(gint)x y:(gint)y
                       width:(gint)width height:(gint)height
 {
+    /* Written from the application thread and read while a frame is being laid
+     * out, so it goes under the same lock as the drawable size -- otherwise a
+     * frame can be positioned against half of the old rectangle and half of the
+     * new one. */
+    [_renderLock lock];
     _haveRenderRect = YES;
     _renderRect.x = x;
     _renderRect.y = y;
     _renderRect.w = width;
     _renderRect.h = height;
+    [_renderLock unlock];
 }
 
 - (void)setHandleEvents:(BOOL)handle
@@ -690,12 +1058,16 @@ fragment float4 videosinkFragmentI420(
 - (void)transformNavigationX:(gdouble)x y:(gdouble)y
                     toVideoX:(gdouble *)vx videoY:(gdouble *)vy
 {
-    if (_displayRect.w > 0 && _displayRect.h > 0 &&
-        _videoWidth > 0 && _videoHeight > 0) {
-        *vx = (x - _displayRect.x) *
-              (gdouble)_videoWidth / (gdouble)_displayRect.w;
-        *vy = (y - _displayRect.y) *
-              (gdouble)_videoHeight / (gdouble)_displayRect.h;
+    /* Snapshotted: this runs on the application thread while the rectangle is
+     * being written by whichever thread last laid a frame out, and a mouse
+     * event landing mid-write would be transformed against a mixed rectangle. */
+    [_renderLock lock];
+    GstVideoRectangle rect = _displayRect;
+    [_renderLock unlock];
+
+    if (rect.w > 0 && rect.h > 0 && _videoWidth > 0 && _videoHeight > 0) {
+        *vx = (x - rect.x) * (gdouble)_videoWidth / (gdouble)rect.w;
+        *vy = (y - rect.y) * (gdouble)_videoHeight / (gdouble)rect.h;
     } else {
         *vx = x;
         *vy = y;
@@ -707,6 +1079,7 @@ fragment float4 videosinkFragmentI420(
 - (void)cleanup
 {
     [self closeWindow];
+    [self discardHeldFrame];
     [_textureCache clear];
 
     for (int fmt = 0; fmt < VF_METAL_INPUT_COUNT; fmt++) {

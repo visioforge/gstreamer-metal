@@ -124,4 +124,6 @@ gst-launch-1.0 \
 - Navigation events are forwarded to the correct sink pad based on pointer coordinates and pad geometry
 - All pad properties are controllable and can be animated via GstController
 - Classification: `Filter/Editor/Video/Compositor`
-- Rank: `GST_RANK_PRIMARY + 2`
+- Rank: `GST_RANK_NONE` — never auto-plugged. `ges_get_compositor_factory()` picks the GES
+  timeline mixer by klass and rank rather than by name, so any higher rank makes this element the
+  mixer of every GES timeline. Create it by name with `gst_element_factory_make()`.

@@ -34,16 +34,26 @@ run_test() {
     fi
 }
 
+# A pipeline that exits 0 is not a pipeline that drew anything: an unrendered
+# frame is GST_FLOW_OK by necessity (see the note on GST_BASE_SINK_FLOW_DROPPED
+# in gstvfmetalvideosink.m), so gst-launch would exit 0 either way. The element
+# says on the bus at teardown when nothing ever reached the screen, which is
+# what turns these back into rendering assertions.
 run_pipeline() {
     local name="$1"
     shift
+    local out
     TOTAL=$((TOTAL + 1))
-    if "${GST_LAUNCH}" "$@" > /dev/null 2>&1; then
-        echo "  PASS  ${name}"
-        PASS=$((PASS + 1))
-    else
+    out="$("${GST_LAUNCH}" "$@" 2>&1)"
+    if [ $? -ne 0 ]; then
         echo "  FAIL  ${name}"
         FAIL=$((FAIL + 1))
+    elif echo "${out}" | grep -q "No video frame was ever displayed"; then
+        echo "  FAIL  ${name} (pipeline ran but nothing was rendered)"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS  ${name}"
+        PASS=$((PASS + 1))
     fi
 }
 
@@ -120,6 +130,47 @@ echo "[Properties]"
 run_pipeline "force-aspect-ratio=false" \
     videotestsrc num-buffers=30 ! "video/x-raw,format=BGRA,width=320,height=240" ! \
     vfmetalvideosink force-aspect-ratio=false
+
+# --- 9. Headless process (issue #878) ---
+# gst-launch-1.0 goes through gst_macos_main(), which runs NSApplication on the
+# main thread and hides the hang. This one compiles a harness that does not.
+echo "[Headless process]"
+HEADLESS_SRC="${SCRIPT_DIR}/test-videosink-headless.c"
+HEADLESS_BIN="${BUILD_DIR}/test-videosink-headless"
+TOTAL=$((TOTAL + 1))
+
+# Same GStreamer discovery build.sh does: the framework if it is installed,
+# otherwise whatever PKG_CONFIG_PATH the caller set. Without this the harness
+# does not compile and the failure is indistinguishable from a real one.
+if [ -d "/Library/Frameworks/GStreamer.framework" ]; then
+    export PKG_CONFIG_PATH="/Library/Frameworks/GStreamer.framework/Libraries/pkgconfig:${PKG_CONFIG_PATH:-}"
+fi
+
+if ! command -v gtimeout > /dev/null 2>&1; then
+    echo "  FAIL  headless test needs gtimeout (brew install coreutils)"
+    FAIL=$((FAIL + 1))
+elif ! pkg-config --exists gstreamer-1.0; then
+    echo "  FAIL  headless test needs pkg-config to find gstreamer-1.0;"
+    echo "        set PKG_CONFIG_PATH the way you set it for ./build.sh"
+    FAIL=$((FAIL + 1))
+elif ! cc "${HEADLESS_SRC}" -o "${HEADLESS_BIN}" \
+        $(pkg-config --cflags --libs gstreamer-1.0) > /dev/null 2>&1; then
+    echo "  FAIL  headless harness did not compile"
+    FAIL=$((FAIL + 1))
+else
+    # GST_REGISTRY_FORK=no: the scanner helper is resolved from a path compiled
+    # into libgstreamer, which is wrong whenever the SDK was relocated, and the
+    # parent then waits on a child that never answers.
+    HEADLESS_OUT="$(GST_REGISTRY_FORK=no gtimeout 75 "${HEADLESS_BIN}" 2>&1)"
+    if [ $? -eq 0 ]; then
+        echo "  PASS  no main run loop: errors out instead of hanging"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL  no main run loop: errors out instead of hanging"
+        echo "${HEADLESS_OUT}" | sed 's/^/        /'
+        FAIL=$((FAIL + 1))
+    fi
+fi
 
 # --- Summary ---
 echo ""

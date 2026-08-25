@@ -50,15 +50,19 @@ struct _GstVfMetalVideoSink
   GstVideoInfo info;
   gboolean have_info;
 
-  /* Window handle from GstVideoOverlay::set_window_handle */
-  guintptr window_handle;
-
   /* Render rectangle from GstVideoOverlay::set_render_rectangle */
   gboolean have_render_rect;
   GstVideoRectangle render_rect;
 
   /* Whether to forward navigation events */
   gboolean handle_events;
+
+  /* Monotonic deadline for the render window to appear, taken on the first
+   * frame that finds it missing. GST_CLOCK_TIME_NONE while none is pending.
+   * Written from the application thread as well as the streaming one, so it is
+   * read and written under GST_OBJECT_LOCK. */
+  GstClockTime window_deadline;
+
 
   /* Metal rendering engine (opaque Obj-C object, cast to MetalVideoSinkRenderer* in .m) */
   void *renderer;

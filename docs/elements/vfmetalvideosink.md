@@ -61,4 +61,5 @@ gst-launch-1.0 videotestsrc ! video/x-raw,format=BGRA,width=320,height=240 ! \
 - When the pipeline transitions to PAUSED->READY, the window is closed
 - Buffer pool proposal includes `GstVideoMeta` support for efficient memory layout negotiation
 - Classification: `Sink/Video`
-- Rank: `GST_RANK_MARGINAL`
+- Rank: `GST_RANK_NONE` — never auto-plugged. `autovideosink` picks a sink by rank, and this one
+  needs a process that runs a Cocoa run loop. Create it by name with `gst_element_factory_make()`.
