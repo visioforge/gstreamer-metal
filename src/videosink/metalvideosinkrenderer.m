@@ -34,41 +34,6 @@
 GST_DEBUG_CATEGORY_EXTERN (gst_vf_metal_video_sink_debug);
 #define GST_CAT_DEFAULT gst_vf_metal_video_sink_debug
 
-/* How long teardown is willing to wait for the main queue. */
-#define VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS 5.0
-
-/* --- Bounded main-queue hop --- */
-
-/* AppKit work must happen on the main thread, but nothing here may block on the
- * main queue without a bound: a process whose main thread runs no Cocoa run
- * loop -- a test host, a console tool, a background service -- never services
- * that queue, and a dispatch_sync onto it waits forever.
- *
- * The streaming thread does not use this at all: see ensureWindowWithHandle:,
- * which dispatches and returns. Teardown does, because it has to know whether
- * the window is gone before the Metal objects behind it are released.
- *
- * Returns YES if the block ran within the bound. */
-static BOOL
-vf_metal_run_on_main_bounded (void (^block) (void))
-{
-    if ([NSThread isMainThread]) {
-        block ();
-        return YES;
-    }
-
-    dispatch_semaphore_t done = dispatch_semaphore_create (0);
-
-    dispatch_async (dispatch_get_main_queue (), ^{
-        block ();
-        dispatch_semaphore_signal (done);
-    });
-
-    return dispatch_semaphore_wait (done, dispatch_time (DISPATCH_TIME_NOW,
-                (int64_t) (VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS * NSEC_PER_SEC)))
-        == 0;
-}
-
 /* --- Videosink-specific Metal shader source --- */
 
 static NSString *const kVideoSinkShaderSource = @R"(
@@ -124,6 +89,41 @@ fragment float4 videosinkFragmentI420(
     return float4(rgb, 1.0);
 }
 )";
+
+/* How long teardown is willing to wait for the main queue. */
+#define VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS 5.0
+
+/* --- Bounded main-queue hop --- */
+
+/* AppKit work must happen on the main thread, but nothing here may block on the
+ * main queue without a bound: a process whose main thread runs no Cocoa run
+ * loop -- a test host, a console tool, a background service -- never services
+ * that queue, and a dispatch_sync onto it waits forever.
+ *
+ * The streaming thread does not use this at all: see ensureWindowWithHandle:,
+ * which dispatches and returns. Teardown does, because it has to know whether
+ * the window is gone before the Metal objects behind it are released.
+ *
+ * Returns YES if the block ran within the bound. */
+static BOOL
+vf_metal_run_on_main_bounded (void (^block) (void))
+{
+    if ([NSThread isMainThread]) {
+        block ();
+        return YES;
+    }
+
+    dispatch_semaphore_t done = dispatch_semaphore_create (0);
+
+    dispatch_async (dispatch_get_main_queue (), ^{
+        block ();
+        dispatch_semaphore_signal (done);
+    });
+
+    return dispatch_semaphore_wait (done, dispatch_time (DISPATCH_TIME_NOW,
+                (int64_t) (VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS * NSEC_PER_SEC)))
+        == 0;
+}
 
 /* ============================================================= */
 /*                      VfMetalView (macOS)                       */
@@ -254,8 +254,15 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 
     /* Whether any frame has reached the screen since the last set_caps. Kept
      * here rather than in the element because the held frame is drawn from the
-     * main thread, where the element's own streaming-thread flag never sees it. */
+     * main thread, where the element's own streaming-thread flag never sees it.
+     *
+     * closeWindow cannot clear it directly: the element asks for it first, to
+     * decide whether to warn, and only then closes. So closeWindow arms a reset
+     * that the next hasRenderedFrame consumes -- otherwise a second clip with
+     * identical caps would inherit the first one's answer, and both the warning
+     * and the test assertion built on it would be one-shot per element. */
     BOOL _renderedAny;
+    BOOL _renderedAnyPendingReset;
 
     /* Cached view properties (updated on main thread only, read under lock) */
     CGSize _cachedDrawableSize;
@@ -356,6 +363,7 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     int width = GST_VIDEO_INFO_WIDTH (info);
     int height = GST_VIDEO_INFO_HEIGHT (info);
     GstVideoFormat format = GST_VIDEO_INFO_FORMAT (info);
+    BOOL ok;
 
     /* Skip if nothing changed */
     if (_configured && _videoWidth == width && _videoHeight == height &&
@@ -363,6 +371,23 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
         return YES;
     }
 
+    /* Under _frameLock for the whole mutation. These fields used to be written
+     * and read on one thread -- set_caps and rendering are both the streaming
+     * thread -- but the held frame and expose now draw from the main thread, and
+     * a caps change landing mid-draw would lay an old picture out against the
+     * new dimensions. Taking the render lock here means no draw is in flight. */
+    [_frameLock lock];
+    ok = [self configureLocked:info width:width height:height format:format];
+    [_frameLock unlock];
+
+    return ok;
+}
+
+- (BOOL)configureLocked:(GstVideoInfo *)info
+                  width:(int)width
+                 height:(int)height
+                 format:(GstVideoFormat)format
+{
     _videoWidth = width;
     _videoHeight = height;
     _videoFormat = format;
@@ -589,6 +614,7 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     _pendingHandle = 0;
     _cachedDrawableSize = CGSizeZero;
     _metalLayer = nil;
+    _renderedAnyPendingReset = YES;
 #if !TARGET_OS_IPHONE
     /* Taken out of the ivars here rather than read from them inside the block:
      * the block then owns what it destroys, so it needs no staleness check and
@@ -868,7 +894,17 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     if (!view || !layer)
         return;
 
+    /* Weak, for the same reason createBlock is: this is dispatched once per
+     * frame, so a main thread stuck in a modal loop queues hundreds of blocks,
+     * and a strong capture would hold the renderer, the view and the layer past
+     * the element's own finalize. */
+    __weak MetalVideoSinkRenderer *weakSelf = self;
+
     void (^updateBlock)(void) = ^{
+        MetalVideoSinkRenderer *self = weakSelf;
+        if (!self)
+            return;
+
         CGSize boundsSize = view.bounds.size;
         CGFloat scale = view.window.backingScaleFactor;
         if (scale <= 0) scale = 1.0;
@@ -909,14 +945,20 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 
 - (void)drawHeldFrame
 {
+    [self drawHeldFrameRetrying:YES];
+}
+
+- (void)drawHeldFrameRetrying:(BOOL)allowRetry
+{
     GstVideoFrame frame;
     GstBuffer *buffer;
     GstVideoInfo info;
+    BOOL drawn = NO;
 
-    /* Taken out under the short lock, and kept rather than consumed: expose has
-     * to redraw it every time the host view is resized while the pipeline sits
-     * in PAUSED. discardHeldFrame releases it -- the element calls that as soon
-     * as a real frame renders, on a caps change and again at teardown. */
+    /* Taken out under the short lock, and kept rather than consumed: the held
+     * frame is whatever is on screen, so expose can redraw it whenever the host
+     * view is resized. discardHeldFrame releases it -- on a caps change and at
+     * teardown. */
     [_heldLock lock];
     buffer = _heldFrame ? gst_buffer_ref (_heldFrame) : NULL;
     info = _heldFrameInfo;
@@ -931,19 +973,34 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
      * drawn right now there is nothing for a redraw to add anyway. */
     if ([_frameLock tryLock]) {
         if (gst_video_frame_map (&frame, &info, buffer, GST_MAP_READ)) {
-            [self renderFrameLocked:&frame];
+            drawn = [self renderFrameLocked:&frame];
             gst_video_frame_unmap (&frame);
         }
         [_frameLock unlock];
     }
 
     gst_buffer_unref (buffer);
+
+    /* nextDrawable can transiently return nil on a layer that has only just been
+     * created. For a pipeline that prerolls and stays in PAUSED this is the only
+     * draw there will ever be, and losing it leaves a black window and a
+     * teardown warning blaming a window that did exist. One retry, next turn. */
+    if (!drawn && allowRetry) {
+        __weak MetalVideoSinkRenderer *weakSelf = self;
+        dispatch_async (dispatch_get_main_queue (), ^{
+            [weakSelf drawHeldFrameRetrying:NO];
+        });
+    }
 }
 
 - (BOOL)hasRenderedFrame
 {
     [_heldLock lock];
     BOOL rendered = _renderedAny;
+    if (_renderedAnyPendingReset) {
+        _renderedAny = NO;
+        _renderedAnyPendingReset = NO;
+    }
     [_heldLock unlock];
     return rendered;
 }
@@ -965,8 +1022,7 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 
 - (void)expose
 {
-    /* Redraw whatever is being held. When a frame has already been rendered
-     * there is nothing held and this does nothing -- the layer still has it. */
+    /* The held frame is the one on screen, so this is a genuine redraw. */
     [self drawHeldFrame];
 }
 

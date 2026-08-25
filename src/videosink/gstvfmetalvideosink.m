@@ -133,6 +133,8 @@ gst_vf_metal_video_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
 {
   GstVfMetalVideoSink *self = GST_VF_METAL_VIDEO_SINK (vsink);
   GstVideoFrame frame;
+  guintptr handle;
+  gboolean detached;
 
   if (!self->renderer || !self->have_info) {
     GST_WARNING_OBJECT (self, "Not configured yet");
@@ -141,6 +143,23 @@ gst_vf_metal_video_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
 
   MetalVideoSinkRenderer *renderer =
       (__bridge MetalVideoSinkRenderer *)self->renderer;
+
+  GST_OBJECT_LOCK (self);
+  handle = self->window_handle;
+  detached = (handle == 0 && self->overlay_used);
+  GST_OBJECT_UNLOCK (self);
+
+  if (detached) {
+    /* The application took its view away while the pipeline is still running.
+     * Falling through would build a standalone window and promote the process
+     * to a regular app, which is not what "detach" asks for. Hold the frame so
+     * a re-attach has something to show, and drop the rest quietly -- no
+     * deadline, because nothing is wrong and nobody is waiting on a window. */
+    @autoreleasepool {
+      [renderer holdFrame:buf info:&self->info];
+    }
+    return GST_FLOW_OK;
+  }
 
   /* Window creation is asynchronous: it can only run on the main thread, and
    * blocking this one until it does is what hung headless processes -- and
@@ -156,7 +175,7 @@ gst_vf_metal_video_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
    * preroll_canceled and fails the state change. GST_FLOW_OK is the only value
    * correct on both. */
   @autoreleasepool {
-    if (![renderer ensureWindowWithHandle:self->window_handle
+    if (![renderer ensureWindowWithHandle:handle
                                     width:GST_VIDEO_SINK_WIDTH (self)
                                    height:GST_VIDEO_SINK_HEIGHT (self)]) {
       GstClockTime now = gst_util_get_timestamp ();
@@ -182,7 +201,7 @@ gst_vf_metal_video_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
         return GST_FLOW_OK;
       }
 
-      if (self->window_handle != 0)
+      if (handle != 0)
         GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
             ("Could not attach to the Metal render window."),
             ("A window handle was supplied, but the main thread did not service "
@@ -205,10 +224,6 @@ gst_vf_metal_video_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
     self->window_deadline = GST_CLOCK_TIME_NONE;
     GST_OBJECT_UNLOCK (self);
 
-    /* The window exists, so nothing is waiting to be drawn any more. */
-    @autoreleasepool {
-      [renderer discardHeldFrame];
-    }
   }
 
   /* Refresh cached drawable size from view bounds (dispatched to main thread) */
@@ -226,6 +241,10 @@ gst_vf_metal_video_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
   @autoreleasepool {
     if (![renderer renderFrame:&frame])
       GST_WARNING_OBJECT (self, "Metal rendering failed");
+    else
+      /* Kept as "what is on screen", so GstVideoOverlay::expose can redraw it
+       * when the host view is resized. One buffer, replaced each frame. */
+      [renderer holdFrame:buf info:&self->info];
   }
 
   gst_video_frame_unmap (&frame);
@@ -278,6 +297,7 @@ gst_vf_metal_video_sink_change_state (GstElement * element,
 {
   GstVfMetalVideoSink *self = GST_VF_METAL_VIDEO_SINK (element);
   GstStateChangeReturn ret;
+  gboolean was_waiting;
 
   GST_DEBUG_OBJECT (self, "%s => %s",
       gst_element_state_get_name (GST_STATE_TRANSITION_CURRENT (transition)),
@@ -318,8 +338,11 @@ gst_vf_metal_video_sink_change_state (GstElement * element,
            * warning also fires when the pipeline is simply stopped during
            * preroll -- Ctrl-C on gst-launch, a preview cancelled -- and asserts
            * a cause that is then untrue. */
-          if (GST_CLOCK_TIME_IS_VALID (self->window_deadline)
-              && ![renderer hasRenderedFrame])
+          GST_OBJECT_LOCK (self);
+          was_waiting = GST_CLOCK_TIME_IS_VALID (self->window_deadline);
+          GST_OBJECT_UNLOCK (self);
+
+          if (was_waiting && ![renderer hasRenderedFrame])
             GST_ELEMENT_WARNING (self, RESOURCE, NOT_FOUND,
                 ("No video frame was ever displayed."),
                 ("The Metal render window never appeared, so every frame was "
@@ -433,7 +456,10 @@ gst_vf_metal_video_sink_set_window_handle (GstVideoOverlay * overlay,
 
   GST_DEBUG_OBJECT (self, "set_window_handle: %p", (void *)handle);
 
+  GST_OBJECT_LOCK (self);
   self->window_handle = handle;
+  self->overlay_used = TRUE;
+  GST_OBJECT_UNLOCK (self);
   /* A fresh handle gets a fresh grace period before the pipeline is failed. */
   GST_OBJECT_LOCK (self);
   self->window_deadline = GST_CLOCK_TIME_NONE;
@@ -633,6 +659,7 @@ gst_vf_metal_video_sink_init (GstVfMetalVideoSink * self)
   self->have_render_rect = FALSE;
   self->handle_events = TRUE;
   self->window_deadline = GST_CLOCK_TIME_NONE;
+  self->overlay_used = FALSE;
 
   @autoreleasepool {
     MetalVideoSinkRenderer *renderer =
