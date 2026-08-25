@@ -77,6 +77,33 @@ else()
         gstreamer-video-1.0
         gstreamer-base-1.0
     )
+
+    # Ship universal. The default lives here rather than in build.sh so that a plain
+    # `cmake -S . -B build`, an IDE or CI produces the same dylib the packaging scripts copy -
+    # they take whatever is in build/ without checking what they got.
+    #
+    # Ask only for what the GStreamer we link can actually provide: against a single-arch
+    # install (Homebrew ships one per host arch) the second slice has nothing to link against,
+    # and hard-coding the pair would fail a build that worked before. An explicit
+    # -DCMAKE_OSX_ARCHITECTURES on the command line still wins over both.
+    if(NOT CMAKE_OSX_ARCHITECTURES)
+        list(GET GST_LIBRARY_DIRS 0 _gst_libdir)
+        execute_process(
+            COMMAND lipo -archs "${_gst_libdir}/libgstreamer-1.0.0.dylib"
+            OUTPUT_VARIABLE _gst_archs
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+            RESULT_VARIABLE _gst_archs_result)
+        if(_gst_archs_result EQUAL 0 AND _gst_archs)
+            string(REPLACE " " ";" _gst_archs "${_gst_archs}")
+        else()
+            set(_gst_archs "${CMAKE_HOST_SYSTEM_PROCESSOR}")
+            message(WARNING "Could not read the architectures of libgstreamer-1.0.0.dylib - "
+                            "building for ${_gst_archs} only.")
+        endif()
+        set(CMAKE_OSX_ARCHITECTURES "${_gst_archs}" CACHE STRING "Build architectures" FORCE)
+    endif()
+    message(STATUS "Architectures: ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
 # ===== Source file lists =====

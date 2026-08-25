@@ -97,8 +97,7 @@ elif [ "$PLATFORM" = "maccatalyst" ]; then
     cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" \
         -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
         -DPLATFORM_MACCATALYST=ON \
-        -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
-        -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+        -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
 
     cmake --build "${BUILD_DIR}" --config "${BUILD_TYPE}" -j$(sysctl -n hw.ncpu)
 
@@ -160,8 +159,7 @@ else
     # Configure
     cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" \
         -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
-        -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
-        -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+        -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
 
     # Build
     cmake --build "${BUILD_DIR}" --config "${BUILD_TYPE}" -j$(sysctl -n hw.ncpu)
