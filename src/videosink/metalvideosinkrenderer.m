@@ -45,41 +45,28 @@ GST_DEBUG_CATEGORY_EXTERN (gst_vf_metal_video_sink_debug);
  * -- never services that queue, and a dispatch_sync onto it wedges the
  * pipeline forever, with no timeout and no error.
  *
- * Returns YES if the block ran to completion. On timeout it returns NO, and
- * when cancelOnTimeout is set the block does nothing should it ever get to run,
- * so a run loop that starts later cannot act behind the caller's back. */
+ * Returns YES if the block ran within the bound.  On NO the block is not
+ * cancelled: it still runs if the queue is serviced later, so whatever it was
+ * asked to do is not silently dropped.  Callers therefore have to tolerate a
+ * late completion -- see how ensureWindowWithHandle: publishes _windowReady. */
 static BOOL
-vf_metal_run_on_main_bounded (void (^block) (void), BOOL cancelOnTimeout)
+vf_metal_run_on_main_bounded (void (^block) (void))
 {
     if ([NSThread isMainThread]) {
         block ();
         return YES;
     }
 
-    __block BOOL cancelled = NO;
-    NSLock *guard = [[NSLock alloc] init];
     dispatch_semaphore_t done = dispatch_semaphore_create (0);
 
     dispatch_async (dispatch_get_main_queue (), ^{
-        [guard lock];
-        if (!cancelled)
-            block ();
-        [guard unlock];
+        block ();
         dispatch_semaphore_signal (done);
     });
 
-    if (dispatch_semaphore_wait (done, dispatch_time (DISPATCH_TIME_NOW,
+    return dispatch_semaphore_wait (done, dispatch_time (DISPATCH_TIME_NOW,
                 (int64_t) (VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS * NSEC_PER_SEC)))
-        == 0)
-        return YES;
-
-    if (cancelOnTimeout) {
-        [guard lock];
-        cancelled = YES;
-        [guard unlock];
-    }
-
-    return NO;
+        == 0;
 }
 
 /* --- Videosink-specific Metal shader source --- */
@@ -403,11 +390,17 @@ fragment float4 videosinkFragmentI420(
         self->_cachedDrawableSize = CGSizeMake(
             boundsSize.width * scale, boundsSize.height * scale);
         self->_metalLayer.drawableSize = self->_cachedDrawableSize;
+
+        /* Published from inside the block, on the main thread: "the window
+         * exists" and "_windowReady" have to be one fact.  Set it in the caller
+         * instead and a block that finishes just after the caller gave up
+         * leaves a window that closeWindow will never tear down. */
+        [self->_renderLock lock];
+        self->_windowReady = YES;
+        [self->_renderLock unlock];
     };
 
-    /* Cancel on timeout: a window created minutes later, by a run loop that
-     * only then started, would be worse than none at all. */
-    if (!vf_metal_run_on_main_bounded (createBlock, YES)) {
+    if (!vf_metal_run_on_main_bounded (createBlock)) {
         GST_ERROR ("MetalVideoSinkRenderer: the main queue was not serviced "
                    "within %g s, so the render window could not be created. "
                    "This process' main thread is not running a Cocoa run loop; "
@@ -416,11 +409,12 @@ fragment float4 videosinkFragmentI420(
                    VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS);
         return NO;
     }
-#endif /* !TARGET_OS_IPHONE */
-
+#else
     [_renderLock lock];
     _windowReady = YES;
     [_renderLock unlock];
+#endif /* !TARGET_OS_IPHONE */
+
     return YES;
 }
 
@@ -466,9 +460,7 @@ fragment float4 videosinkFragmentI420(
         }
     };
 
-    /* Do not cancel: if the queue is only serviced later, the window still
-     * wants tearing down. Teardown just refuses to block on it. */
-    if (!vf_metal_run_on_main_bounded (closeBlock, NO)) {
+    if (!vf_metal_run_on_main_bounded (closeBlock)) {
         GST_WARNING ("MetalVideoSinkRenderer: the main queue was not serviced "
                      "within %g s; leaving the window to be closed by the run "
                      "loop rather than blocking teardown.",
