@@ -41,6 +41,14 @@
 - (BOOL)ensureWindowWithHandle:(guintptr)handle
                          width:(int)width
                         height:(int)height;
+
+/* The authoritative form. Only set_window_handle knows which handle the
+ * application asked for last, so only it may retire a window already queued for
+ * a different one. */
+- (BOOL)ensureWindowWithHandle:(guintptr)handle
+                         width:(int)width
+                        height:(int)height
+                 authoritative:(BOOL)authoritative;
 - (void)closeWindow;
 
 /* Rendering */

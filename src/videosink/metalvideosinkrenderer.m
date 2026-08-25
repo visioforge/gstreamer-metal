@@ -256,13 +256,12 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
      * here rather than in the element because the held frame is drawn from the
      * main thread, where the element's own streaming-thread flag never sees it.
      *
-     * closeWindow cannot clear it directly: the element asks for it first, to
-     * decide whether to warn, and only then closes. So closeWindow arms a reset
-     * that the next hasRenderedFrame consumes -- otherwise a second clip with
-     * identical caps would inherit the first one's answer, and both the warning
-     * and the test assertion built on it would be one-shot per element. */
+     * Cleared by closeWindow, which the element calls only after it has asked:
+     * without that a second clip with identical caps inherits the first one's
+     * answer -- configureWithVideoInfo: returns early when nothing changed --
+     * and both the warning and the test assertion built on it become one-shot
+     * per element. */
     BOOL _renderedAny;
-    BOOL _renderedAnyPendingReset;
 
     /* Cached view properties (updated on main thread only, read under lock) */
     CGSize _cachedDrawableSize;
@@ -440,14 +439,32 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
                          width:(int)width
                         height:(int)height
 {
+    return [self ensureWindowWithHandle:handle width:width height:height
+                          authoritative:NO];
+}
+
+- (BOOL)ensureWindowWithHandle:(guintptr)handle
+                         width:(int)width
+                        height:(int)height
+                 authoritative:(BOOL)authoritative
+{
     [_renderLock lock];
     if (_windowReady && _attachedHandle == handle) {
         [_renderLock unlock];
         return YES;
     }
-    if (_windowPending && _pendingHandle == handle) {
-        /* Already queued for this handle. A second block would add a second
-         * view to the same parent and orphan the first. */
+    if (_windowPending
+        && (_pendingHandle == handle || !authoritative)) {
+        /* Already queued. A second block would add a second view to the same
+         * parent and orphan the first.
+         *
+         * Also when the queued handle is a DIFFERENT one and this call is not
+         * authoritative: only set_window_handle knows what the application
+         * asked for last. show_frame reaches here with a handle it read a
+         * moment ago, and letting that retire a block queued by a newer
+         * set_window_handle would bind the sink to the view the application
+         * just moved away from -- with no further buffer to correct it if the
+         * pipeline is sitting in PAUSED. */
         [_renderLock unlock];
         return NO;
     }
@@ -614,7 +631,6 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     _pendingHandle = 0;
     _cachedDrawableSize = CGSizeZero;
     _metalLayer = nil;
-    _renderedAnyPendingReset = YES;
 #if !TARGET_OS_IPHONE
     /* Taken out of the ivars here rather than read from them inside the block:
      * the block then owns what it destroys, so it needs no staleness check and
@@ -625,6 +641,13 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     _renderView = nil;
 #endif
     [_renderLock unlock];
+
+    /* A window that goes takes "something was displayed" with it: the next one
+     * starts having shown nothing. Under _heldLock, which owns this field, and
+     * safe here because the element asks before it closes. */
+    [_heldLock lock];
+    _renderedAny = NO;
+    [_heldLock unlock];
 
 #if !TARGET_OS_IPHONE
     if (!window && !view)
@@ -887,22 +910,30 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
      * moment later. Take strong local references under the lock and let the
      * block work from those. */
     [_renderLock lock];
-    VfMetalView *view = _renderView;
-    CAMetalLayer *layer = _metalLayer;
+    BOOL haveWindow = (_renderView != nil && _metalLayer != nil);
     [_renderLock unlock];
 
-    if (!view || !layer)
+    if (!haveWindow)
         return;
 
-    /* Weak, for the same reason createBlock is: this is dispatched once per
-     * frame, so a main thread stuck in a modal loop queues hundreds of blocks,
-     * and a strong capture would hold the renderer, the view and the layer past
-     * the element's own finalize. */
+    /* Weak, and nothing else captured: this is dispatched once per frame, so a
+     * main thread stuck in a modal loop queues hundreds of these. Capturing the
+     * view or the layer as locals would keep them alive past closeWindow and
+     * past the element's finalize just as surely as capturing self would, so the
+     * block re-reads both under the lock instead. */
     __weak MetalVideoSinkRenderer *weakSelf = self;
 
     void (^updateBlock)(void) = ^{
         MetalVideoSinkRenderer *self = weakSelf;
         if (!self)
+            return;
+
+        [self->_renderLock lock];
+        VfMetalView *view = self->_renderView;
+        CAMetalLayer *layer = self->_metalLayer;
+        [self->_renderLock unlock];
+
+        if (!view || !layer)
             return;
 
         CGSize boundsSize = view.bounds.size;
@@ -955,31 +986,38 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     GstVideoInfo info;
     BOOL drawn = NO;
 
-    /* Taken out under the short lock, and kept rather than consumed: the held
-     * frame is whatever is on screen, so expose can redraw it whenever the host
-     * view is resized. discardHeldFrame releases it -- on a caps change and at
-     * teardown. */
+    /* tryLock, not lock: this runs on the main thread, and the streaming thread
+     * holds _frameLock for the whole of a render including [layer nextDrawable],
+     * which blocks when the drawable pool is empty. If a real frame is being
+     * drawn right now there is nothing for a redraw to add anyway.
+     *
+     * Taken FIRST, before the held frame is read: _frameLock is what keeps a
+     * caps change out, and reading the buffer before taking it would let
+     * configureWithVideoInfo: swap the dimensions underneath -- the old picture
+     * would then be laid out against the new ones. */
+    if (![_frameLock tryLock])
+        return;
+
+    /* Kept rather than consumed: the held frame is whatever is on screen, so
+     * expose can redraw it whenever the host view is resized. discardHeldFrame
+     * releases it -- on a caps change and at teardown. */
     [_heldLock lock];
     buffer = _heldFrame ? gst_buffer_ref (_heldFrame) : NULL;
     info = _heldFrameInfo;
     [_heldLock unlock];
 
-    if (!buffer)
-        return;
-
-    /* tryLock, not lock: this runs on the main thread, and the streaming thread
-     * holds _frameLock for the whole of a render including [layer nextDrawable],
-     * which blocks when the drawable pool is empty. If a real frame is being
-     * drawn right now there is nothing for a redraw to add anyway. */
-    if ([_frameLock tryLock]) {
+    if (buffer) {
         if (gst_video_frame_map (&frame, &info, buffer, GST_MAP_READ)) {
             drawn = [self renderFrameLocked:&frame];
             gst_video_frame_unmap (&frame);
         }
-        [_frameLock unlock];
+        gst_buffer_unref (buffer);
     }
 
-    gst_buffer_unref (buffer);
+    [_frameLock unlock];
+
+    if (!buffer)
+        return;
 
     /* nextDrawable can transiently return nil on a layer that has only just been
      * created. For a pipeline that prerolls and stays in PAUSED this is the only
@@ -997,10 +1035,6 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 {
     [_heldLock lock];
     BOOL rendered = _renderedAny;
-    if (_renderedAnyPendingReset) {
-        _renderedAny = NO;
-        _renderedAnyPendingReset = NO;
-    }
     [_heldLock unlock];
     return rendered;
 }

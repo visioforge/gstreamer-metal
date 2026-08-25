@@ -479,13 +479,17 @@ gst_vf_metal_video_sink_set_window_handle (GstVideoOverlay * overlay,
        * value: an application that destroys its view and creates another can be
        * handed the same address back, and skipping on that would leave the sink
        * drawing into a view whose parent is gone. */
-      if (![renderer isAttachedToHandle:handle])
+      /* handle == 0 always closes: in internal-window mode _attachedHandle is
+       * 0 too, so asking whether we are attached to 0 answers yes and a detach
+       * would leave the standalone window frozen on screen for good. */
+      if (handle == 0 || ![renderer isAttachedToHandle:handle])
         [renderer closeWindow];
 
       if (handle != 0
           && ![renderer ensureWindowWithHandle:handle
                                          width:GST_VIDEO_SINK_WIDTH (self)
-                                        height:GST_VIDEO_SINK_HEIGHT (self)])
+                                        height:GST_VIDEO_SINK_HEIGHT (self)
+                                 authoritative:YES])
         GST_DEBUG_OBJECT (self, "window creation queued on the main thread; "
             "frames are dropped until it runs");
     }
