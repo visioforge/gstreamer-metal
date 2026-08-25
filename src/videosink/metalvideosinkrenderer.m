@@ -232,6 +232,19 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     /* Thread safety: protects _windowReady, _metalLayer access across threads */
     NSLock *_renderLock;
 
+    /* Serialises renderFrame: against itself. Rendering normally happens on one
+     * streaming thread, but the frame held below is drawn from the main thread
+     * when the window finally appears, and the texture cache is not reentrant. */
+    NSLock *_frameLock;
+
+    /* The most recent frame that arrived before there was a window to draw it
+     * in, kept so it can be drawn as soon as there is one. Without it a pipeline
+     * that prerolls and stays in PAUSED -- a paused preview, a scrub, a
+     * thumbnail -- shows an empty window: its one frame was dropped and nothing
+     * ever asks for it again. */
+    GstBuffer *_heldFrame;
+    GstVideoInfo _heldFrameInfo;
+
     /* Cached view properties (updated on main thread only, read under lock) */
     CGSize _cachedDrawableSize;
     CGFloat _cachedContentsScale;
@@ -295,6 +308,7 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     _configured = NO;
     _cachedDrawableSize = CGSizeZero;
     _cachedContentsScale = 1.0;
+    _frameLock = [[NSLock alloc] init];
 
     return self;
 }
@@ -400,6 +414,8 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     [_renderLock unlock];
 
 #if !TARGET_OS_IPHONE
+    __weak MetalVideoSinkRenderer *weakSelf = self;
+
     /* The window is built into locals with no lock held, and every ivar is then
      * assigned in one locked step at the end.  Holding the lock across AppKit
      * would be the safer-looking shape and is the more dangerous one: it is not
@@ -407,13 +423,23 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
      * deadlock the main thread against itself -- the exact failure this element
      * is being fixed for. */
     void (^createBlock)(void) = ^{
-        [self->_renderLock lock];
-        if (self->_windowEpoch != epoch) {
-            self->_windowPending = NO;
-            [self->_renderLock unlock];
+        /* Weak: in a process that never drains its main queue this block is
+         * never run and never released, and a strong reference would keep a
+         * whole renderer -- Metal device, texture cache, pipeline states --
+         * alive for the life of the process, once per PLAYING cycle. */
+        MetalVideoSinkRenderer *strongSelf = weakSelf;
+        if (!strongSelf)
+            return;
+
+        [strongSelf->_renderLock lock];
+        if (strongSelf->_windowEpoch != epoch) {
+            /* Retired. _windowPending is not cleared here: it belongs to
+             * whatever superseded this block, and clearing it would make the
+             * next frame queue a redundant third one. */
+            [strongSelf->_renderLock unlock];
             return;
         }
-        [self->_renderLock unlock];
+        [strongSelf->_renderLock unlock];
 
         NSWindow *window = nil;
         VfMetalView *view = nil;
@@ -462,28 +488,31 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
             boundsSize.width * scale, boundsSize.height * scale);
         layer.drawableSize = drawableSize;
 
-        [self->_renderLock lock];
-        if (self->_windowEpoch != epoch) {
+        [strongSelf->_renderLock lock];
+        if (strongSelf->_windowEpoch != epoch) {
             /* Torn down while this was building. Nothing was published, so this
-             * block still owns what it made and has to undo it. */
-            self->_windowPending = NO;
-            [self->_renderLock unlock];
+             * block still owns what it made and has to undo it. _windowPending
+             * is left to whatever superseded it. */
+            [strongSelf->_renderLock unlock];
             vf_metal_destroy_window (window, view);
             return;
         }
 
-        self->_internalWindow = window;
-        self->_renderView = view;
-        self->_metalLayer = layer;
-        self->_cachedContentsScale = scale;
-        self->_cachedDrawableSize = drawableSize;
+        strongSelf->_internalWindow = window;
+        strongSelf->_renderView = view;
+        strongSelf->_metalLayer = layer;
+        strongSelf->_cachedContentsScale = scale;
+        strongSelf->_cachedDrawableSize = drawableSize;
 
         /* Published at the point the window actually exists: "there is a
          * window" and "_windowReady" are one fact. */
-        self->_windowReady = YES;
-        self->_windowPending = NO;
-        self->_attachedHandle = handle;
-        [self->_renderLock unlock];
+        strongSelf->_windowReady = YES;
+        strongSelf->_windowPending = NO;
+        strongSelf->_attachedHandle = handle;
+        [strongSelf->_renderLock unlock];
+
+        /* Draw whatever arrived while there was nowhere to draw it. */
+        [strongSelf drawHeldFrame];
     };
 
     if ([NSThread isMainThread])
@@ -494,11 +523,12 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     [_renderLock lock];
     _windowReady = YES;
     _windowPending = NO;
+    _attachedHandle = handle;
     [_renderLock unlock];
 #endif /* !TARGET_OS_IPHONE */
 
     [_renderLock lock];
-    BOOL ready = _windowReady;
+    BOOL ready = (_windowReady && _attachedHandle == handle);
     [_renderLock unlock];
     return ready;
 }
@@ -593,6 +623,14 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 /* --- Rendering --- */
 
 - (BOOL)renderFrame:(GstVideoFrame *)frame
+{
+    [_frameLock lock];
+    BOOL ok = [self renderFrameLocked:frame];
+    [_frameLock unlock];
+    return ok;
+}
+
+- (BOOL)renderFrameLocked:(GstVideoFrame *)frame
 {
     [_renderLock lock];
     if (!_windowReady || !_metalLayer || !_configured) {
@@ -804,11 +842,47 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 #endif
 }
 
+- (void)holdFrame:(GstBuffer *)buffer info:(GstVideoInfo *)info
+{
+    [_frameLock lock];
+    gst_buffer_replace (&_heldFrame, buffer);
+    _heldFrameInfo = *info;
+    [_frameLock unlock];
+}
+
+- (void)drawHeldFrame
+{
+    GstVideoFrame frame;
+    GstBuffer *buffer;
+    GstVideoInfo info;
+
+    [_frameLock lock];
+    buffer = _heldFrame ? gst_buffer_ref (_heldFrame) : NULL;
+    info = _heldFrameInfo;
+    gst_buffer_replace (&_heldFrame, NULL);
+
+    if (buffer) {
+        if (gst_video_frame_map (&frame, &info, buffer, GST_MAP_READ)) {
+            [self renderFrameLocked:&frame];
+            gst_video_frame_unmap (&frame);
+        }
+        gst_buffer_unref (buffer);
+    }
+    [_frameLock unlock];
+}
+
+- (void)discardHeldFrame
+{
+    [_frameLock lock];
+    gst_buffer_replace (&_heldFrame, NULL);
+    [_frameLock unlock];
+}
+
 - (void)expose
 {
-    /* Request a redraw. For now this is a no-op since we don't cache
-     * the last frame. The element can re-render via gst_base_sink_get_last_sample()
-     * if needed in the future. */
+    /* Redraw whatever is being held. When a frame has already been rendered
+     * there is nothing held and this does nothing -- the layer still has it. */
+    [self drawHeldFrame];
 }
 
 /* --- Properties --- */
@@ -862,6 +936,7 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 - (void)cleanup
 {
     [self closeWindow];
+    [self discardHeldFrame];
     [_textureCache clear];
 
     for (int fmt = 0; fmt < VF_METAL_INPUT_COUNT; fmt++) {

@@ -61,8 +61,14 @@ struct _GstVfMetalVideoSink
   gboolean handle_events;
 
   /* Monotonic deadline for the render window to appear, taken on the first
-   * frame that finds it missing. GST_CLOCK_TIME_NONE while none is pending. */
+   * frame that finds it missing. GST_CLOCK_TIME_NONE while none is pending.
+   * Written from the application thread as well as the streaming one, so it is
+   * read and written under GST_OBJECT_LOCK. */
   GstClockTime window_deadline;
+
+  /* Whether any frame has ever reached the screen, so teardown can say that
+   * none did. Streaming thread only. */
+  gboolean rendered_any;
 
   /* Metal rendering engine (opaque Obj-C object, cast to MetalVideoSinkRenderer* in .m) */
   void *renderer;

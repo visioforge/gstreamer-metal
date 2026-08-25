@@ -34,16 +34,26 @@ run_test() {
     fi
 }
 
+# A pipeline that exits 0 is not a pipeline that drew anything: an unrendered
+# frame is GST_FLOW_OK by necessity (see the note on GST_BASE_SINK_FLOW_DROPPED
+# in gstvfmetalvideosink.m), so gst-launch would exit 0 either way. The element
+# says on the bus at teardown when nothing ever reached the screen, which is
+# what turns these back into rendering assertions.
 run_pipeline() {
     local name="$1"
     shift
+    local out
     TOTAL=$((TOTAL + 1))
-    if "${GST_LAUNCH}" "$@" > /dev/null 2>&1; then
-        echo "  PASS  ${name}"
-        PASS=$((PASS + 1))
-    else
+    out="$("${GST_LAUNCH}" "$@" 2>&1)"
+    if [ $? -ne 0 ]; then
         echo "  FAIL  ${name}"
         FAIL=$((FAIL + 1))
+    elif echo "${out}" | grep -q "No video frame was ever displayed"; then
+        echo "  FAIL  ${name} (pipeline ran but nothing was rendered)"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS  ${name}"
+        PASS=$((PASS + 1))
     fi
 }
 

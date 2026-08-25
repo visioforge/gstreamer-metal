@@ -45,6 +45,12 @@
 
 /* Rendering */
 - (BOOL)renderFrame:(GstVideoFrame *)frame;
+
+/* Keeps a frame that arrived before there was a window, so it can be drawn as
+ * soon as one exists. Without it a pipeline that prerolls and stays in PAUSED
+ * shows an empty window. */
+- (void)holdFrame:(GstBuffer *)buffer info:(GstVideoInfo *)info;
+- (void)discardHeldFrame;
 - (void)updateDrawableSize;
 - (void)expose;
 
