@@ -133,8 +133,7 @@ gst_vf_metal_video_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
 {
   GstVfMetalVideoSink *self = GST_VF_METAL_VIDEO_SINK (vsink);
   GstVideoFrame frame;
-  guintptr handle;
-  gboolean detached;
+  VfMetalWindowState window;
 
   if (!self->renderer || !self->have_info) {
     GST_WARNING_OBJECT (self, "Not configured yet");
@@ -144,28 +143,11 @@ gst_vf_metal_video_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
   MetalVideoSinkRenderer *renderer =
       (__bridge MetalVideoSinkRenderer *)self->renderer;
 
-  GST_OBJECT_LOCK (self);
-  handle = self->window_handle;
-  detached = (handle == 0 && self->overlay_used);
-  GST_OBJECT_UNLOCK (self);
-
-  if (detached) {
-    /* The application took its view away while the pipeline is still running.
-     * Falling through would build a standalone window and promote the process
-     * to a regular app, which is not what "detach" asks for. Hold the frame so
-     * a re-attach has something to show, and drop the rest quietly -- no
-     * deadline, because nothing is wrong and nobody is waiting on a window. */
-    @autoreleasepool {
-      [renderer holdFrame:buf info:&self->info];
-    }
-    return GST_FLOW_OK;
-  }
-
   /* Window creation is asynchronous: it can only run on the main thread, and
    * blocking this one until it does is what hung headless processes -- and
    * deadlocks an AppKit host whose main thread is inside gst_element_get_state()
-   * waiting for this very preroll. So drop frames until the window shows up,
-   * which lets preroll finish and frees that thread to build it.
+   * waiting for this very preroll. So hold the frame and drop the rest until the
+   * window shows up, which lets preroll finish and frees that thread to build it.
    *
    * A dropped frame returns GST_FLOW_OK and not GST_BASE_SINK_FLOW_DROPPED,
    * which is what that value is nominally for. show_frame maps to both
@@ -175,56 +157,60 @@ gst_vf_metal_video_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
    * preroll_canceled and fails the state change. GST_FLOW_OK is the only value
    * correct on both. */
   @autoreleasepool {
-    if (![renderer ensureWindowWithHandle:handle
-                                    width:GST_VIDEO_SINK_WIDTH (self)
-                                   height:GST_VIDEO_SINK_HEIGHT (self)]) {
-      GstClockTime now = gst_util_get_timestamp ();
-      GstClockTime deadline;
+    window = [renderer ensureWindowWithWidth:GST_VIDEO_SINK_WIDTH (self)
+                                      height:GST_VIDEO_SINK_HEIGHT (self)];
+  }
 
-      /* Hold it rather than lose it: a pipeline that prerolls and stays in
-       * PAUSED gets exactly one frame, and dropping it outright leaves an empty
-       * window with nothing left to ask for a redraw. */
-      @autoreleasepool {
-        [renderer holdFrame:buf info:&self->info];
-      }
+  if (window != VF_METAL_WINDOW_READY) {
+    GstClockTime now = gst_util_get_timestamp ();
+    GstClockTime deadline;
 
-      GST_OBJECT_LOCK (self);
-      if (!GST_CLOCK_TIME_IS_VALID (self->window_deadline))
-        self->window_deadline =
-            now + VF_METAL_WINDOW_WAIT_SECONDS * GST_SECOND;
-      deadline = self->window_deadline;
-      GST_OBJECT_UNLOCK (self);
-
-      if (now < deadline) {
-        GST_INFO_OBJECT (self, "no render window yet; holding this frame and "
-            "dropping the rest for up to %d s", VF_METAL_WINDOW_WAIT_SECONDS);
-        return GST_FLOW_OK;
-      }
-
-      if (handle != 0)
-        GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
-            ("Could not attach to the Metal render window."),
-            ("A window handle was supplied, but the main thread did not service "
-                "its queue within %d s, so the render view could not be added "
-                "to it. The handle must be an NSView* and this process must run "
-                "a Cocoa run loop.", VF_METAL_WINDOW_WAIT_SECONDS));
-      else
-        GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
-            ("Could not create the Metal render window."),
-            ("No window handle was supplied through GstVideoOverlay, and the "
-                "main thread did not service its queue within %d s, so an "
-                "NSWindow could not be created. Set a window handle through "
-                "GstVideoOverlay, or run this process as an AppKit "
-                "application.", VF_METAL_WINDOW_WAIT_SECONDS));
-
-      return GST_FLOW_ERROR;
+    /* Held rather than lost: a pipeline that prerolls and stays in PAUSED gets
+     * exactly one frame, and dropping it leaves an empty window with nothing
+     * left to ask for a redraw. */
+    @autoreleasepool {
+      [renderer holdFrame:buf info:&self->info];
     }
 
+    /* Detached is not a fault and nobody is waiting on a window: the frame is
+     * kept for a re-attach and the rest are dropped quietly. */
+    if (window == VF_METAL_WINDOW_DETACHED)
+      return GST_FLOW_OK;
+
     GST_OBJECT_LOCK (self);
-    self->window_deadline = GST_CLOCK_TIME_NONE;
+    if (!GST_CLOCK_TIME_IS_VALID (self->window_deadline))
+      self->window_deadline = now + VF_METAL_WINDOW_WAIT_SECONDS * GST_SECOND;
+    deadline = self->window_deadline;
     GST_OBJECT_UNLOCK (self);
 
+    if (now < deadline) {
+      GST_INFO_OBJECT (self, "no render window yet; holding this frame and "
+          "dropping the rest for up to %d s", VF_METAL_WINDOW_WAIT_SECONDS);
+      return GST_FLOW_OK;
+    }
+
+    if ([renderer hasWindowHandle])
+      GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
+          ("Could not attach to the Metal render window."),
+          ("A window handle was supplied, but the main thread did not service "
+              "its queue within %d s, so the render view could not be added to "
+              "it. The handle must be an NSView* and this process must run a "
+              "Cocoa run loop.", VF_METAL_WINDOW_WAIT_SECONDS));
+    else
+      GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
+          ("Could not create the Metal render window."),
+          ("No window handle was supplied through GstVideoOverlay, and the "
+              "main thread did not service its queue within %d s, so an "
+              "NSWindow could not be created. Set a window handle through "
+              "GstVideoOverlay, or run this process as an AppKit "
+              "application.", VF_METAL_WINDOW_WAIT_SECONDS));
+
+    return GST_FLOW_ERROR;
   }
+
+  GST_OBJECT_LOCK (self);
+  self->window_deadline = GST_CLOCK_TIME_NONE;
+  GST_OBJECT_UNLOCK (self);
 
   /* Refresh cached drawable size from view bounds (dispatched to main thread) */
   @autoreleasepool {
@@ -456,10 +442,6 @@ gst_vf_metal_video_sink_set_window_handle (GstVideoOverlay * overlay,
 
   GST_DEBUG_OBJECT (self, "set_window_handle: %p", (void *)handle);
 
-  GST_OBJECT_LOCK (self);
-  self->window_handle = handle;
-  self->overlay_used = TRUE;
-  GST_OBJECT_UNLOCK (self);
   /* A fresh handle gets a fresh grace period before the pipeline is failed. */
   GST_OBJECT_LOCK (self);
   self->window_deadline = GST_CLOCK_TIME_NONE;
@@ -467,31 +449,13 @@ gst_vf_metal_video_sink_set_window_handle (GstVideoOverlay * overlay,
 
   if (self->renderer) {
     @autoreleasepool {
+      /* The renderer owns the handle. Keeping a copy here as well is what let a
+       * show_frame reading a stale one retire a window queued for the new one. */
       MetalVideoSinkRenderer *renderer =
           (__bridge MetalVideoSinkRenderer *)self->renderer;
-
-      /* GstVideoOverlay lets the application move the sink to a different
-       * window whenever it likes, so tear the current one down first --
-       * otherwise ensureWindowWithHandle: sees a window it already has and
-       * keeps rendering into the old view. A no-op when there is none.
-       *
-       * Asked of the renderer rather than compared against the previous handle
-       * value: an application that destroys its view and creates another can be
-       * handed the same address back, and skipping on that would leave the sink
-       * drawing into a view whose parent is gone. */
-      /* handle == 0 always closes: in internal-window mode _attachedHandle is
-       * 0 too, so asking whether we are attached to 0 answers yes and a detach
-       * would leave the standalone window frozen on screen for good. */
-      if (handle == 0 || ![renderer isAttachedToHandle:handle])
-        [renderer closeWindow];
-
-      if (handle != 0
-          && ![renderer ensureWindowWithHandle:handle
-                                         width:GST_VIDEO_SINK_WIDTH (self)
-                                        height:GST_VIDEO_SINK_HEIGHT (self)
-                                 authoritative:YES])
-        GST_DEBUG_OBJECT (self, "window creation queued on the main thread; "
-            "frames are dropped until it runs");
+      [renderer setWindowHandle:handle
+                          width:GST_VIDEO_SINK_WIDTH (self)
+                         height:GST_VIDEO_SINK_HEIGHT (self)];
     }
   }
 }
@@ -658,12 +622,10 @@ static void
 gst_vf_metal_video_sink_init (GstVfMetalVideoSink * self)
 {
   self->force_aspect_ratio = DEFAULT_FORCE_ASPECT_RATIO;
-  self->window_handle = 0;
   self->have_info = FALSE;
   self->have_render_rect = FALSE;
   self->handle_events = TRUE;
   self->window_deadline = GST_CLOCK_TIME_NONE;
-  self->overlay_used = FALSE;
 
   @autoreleasepool {
     MetalVideoSinkRenderer *renderer =

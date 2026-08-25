@@ -35,20 +35,18 @@
 - (BOOL)configureWithVideoInfo:(GstVideoInfo *)info;
 
 /* Window management */
-/* Returns YES once the window exists.  Never blocks: creation is queued on the
- * main thread, so NO means "not yet" and the caller should drop the frame and
- * ask again. */
-- (BOOL)ensureWindowWithHandle:(guintptr)handle
-                         width:(int)width
-                        height:(int)height;
+/* What ensureWindowWithWidth:height: has to say about the render window. */
+typedef NS_ENUM (NSInteger, VfMetalWindowState) {
+    VF_METAL_WINDOW_READY,      /* draw into it now */
+    VF_METAL_WINDOW_PENDING,    /* being built on the main thread; hold the frame */
+    VF_METAL_WINDOW_DETACHED,   /* the application took its view away */
+};
 
-/* The authoritative form. Only set_window_handle knows which handle the
- * application asked for last, so only it may retire a window already queued for
- * a different one. */
-- (BOOL)ensureWindowWithHandle:(guintptr)handle
-                         width:(int)width
-                        height:(int)height
-                 authoritative:(BOOL)authoritative;
+/* Window management. Never blocks: creation is queued on the main thread, so
+ * PENDING means "not yet" and the caller should hold the frame and ask again. */
+- (void)setWindowHandle:(guintptr)handle width:(int)width height:(int)height;
+- (VfMetalWindowState)ensureWindowWithWidth:(int)width height:(int)height;
+- (BOOL)hasWindowHandle;
 - (void)closeWindow;
 
 /* Rendering */
@@ -65,11 +63,6 @@
  * from the main thread, where the element cannot see it happen. */
 - (BOOL)hasRenderedFrame;
 
-/* Whether a live window is attached to exactly this handle. Lets the element
- * skip a pointless rebuild without assuming that an unchanged handle value
- * means an unchanged window -- an application can destroy its view and get the
- * same address back for the next one. */
-- (BOOL)isAttachedToHandle:(guintptr)handle;
 - (void)updateDrawableSize;
 - (void)expose;
 

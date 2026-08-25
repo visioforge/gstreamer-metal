@@ -50,14 +50,6 @@ struct _GstVfMetalVideoSink
   GstVideoInfo info;
   gboolean have_info;
 
-  /* Window handle from GstVideoOverlay::set_window_handle */
-  guintptr window_handle;
-
-
-  /* Whether the application has ever used GstVideoOverlay on this element. Once
-   * it has, a handle of 0 means "detached" and never "make your own window". */
-  gboolean overlay_used;
-
   /* Render rectangle from GstVideoOverlay::set_render_rectangle */
   gboolean have_render_rect;
   GstVideoRectangle render_rect;

@@ -90,41 +90,6 @@ fragment float4 videosinkFragmentI420(
 }
 )";
 
-/* How long teardown is willing to wait for the main queue. */
-#define VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS 5.0
-
-/* --- Bounded main-queue hop --- */
-
-/* AppKit work must happen on the main thread, but nothing here may block on the
- * main queue without a bound: a process whose main thread runs no Cocoa run
- * loop -- a test host, a console tool, a background service -- never services
- * that queue, and a dispatch_sync onto it waits forever.
- *
- * The streaming thread does not use this at all: see ensureWindowWithHandle:,
- * which dispatches and returns. Teardown does, because it has to know whether
- * the window is gone before the Metal objects behind it are released.
- *
- * Returns YES if the block ran within the bound. */
-static BOOL
-vf_metal_run_on_main_bounded (void (^block) (void))
-{
-    if ([NSThread isMainThread]) {
-        block ();
-        return YES;
-    }
-
-    dispatch_semaphore_t done = dispatch_semaphore_create (0);
-
-    dispatch_async (dispatch_get_main_queue (), ^{
-        block ();
-        dispatch_semaphore_signal (done);
-    });
-
-    return dispatch_semaphore_wait (done, dispatch_time (DISPATCH_TIME_NOW,
-                (int64_t) (VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS * NSEC_PER_SEC)))
-        == 0;
-}
-
 /* ============================================================= */
 /*                      VfMetalView (macOS)                       */
 /* ============================================================= */
@@ -232,35 +197,23 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     /* Thread safety: protects _windowReady, _metalLayer access across threads */
     NSLock *_renderLock;
 
-    /* Serialises renderFrame: against itself. Rendering normally happens on one
-     * streaming thread, but the frame held below is drawn from the main thread
-     * when the window finally appears, and the texture cache is not reentrant.
-     * Held for the whole of a render, which includes [layer nextDrawable] and
-     * can therefore take a frame interval or more. */
+    /* Serialises rendering, and keeps a caps change out of one. Held for the
+     * whole of a render, so it can be held for a frame interval or more. */
     NSLock *_frameLock;
 
-    /* Guards the held frame and _renderedAny only, and is never held across a
-     * render -- otherwise the streaming thread's per-frame holdFrame/discard
-     * would queue behind a main-thread redraw sitting in nextDrawable. */
+    /* Guards the held frame and _renderedAny. Never held across a render, so
+     * the streaming thread's per-frame hold does not queue behind a redraw. */
     NSLock *_heldLock;
 
-    /* The most recent frame that arrived before there was a window to draw it
-     * in, kept so it can be drawn as soon as there is one. Without it a pipeline
-     * that prerolls and stays in PAUSED -- a paused preview, a scrub, a
-     * thumbnail -- shows an empty window: its one frame was dropped and nothing
-     * ever asks for it again. */
+    /* Whatever is on screen, or would be if there were a window yet. A pipeline
+     * that prerolls and stays in PAUSED gets one frame; without this it is lost
+     * and the window stays empty, and expose has nothing to redraw. */
     GstBuffer *_heldFrame;
     GstVideoInfo _heldFrameInfo;
 
-    /* Whether any frame has reached the screen since the last set_caps. Kept
-     * here rather than in the element because the held frame is drawn from the
-     * main thread, where the element's own streaming-thread flag never sees it.
-     *
-     * Cleared by closeWindow, which the element calls only after it has asked:
-     * without that a second clip with identical caps inherits the first one's
-     * answer -- configureWithVideoInfo: returns early when nothing changed --
-     * and both the warning and the test assertion built on it become one-shot
-     * per element. */
+    /* Whether anything has reached the screen. Lives here, not in the element,
+     * because the held frame is drawn from the main thread. Cleared by
+     * closeWindow, which the element calls only after it has asked. */
     BOOL _renderedAny;
 
     /* Cached view properties (updated on main thread only, read under lock) */
@@ -272,11 +225,11 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     BOOL _windowPending;
     BOOL _configured;
 
-    /* Which handle the queued block is building for, and which the live window
-     * belongs to. Without these an ensureWindowWithHandle: for a NEW handle
-     * would see _windowPending and defer to a block still building the OLD
-     * one -- and the sink would keep drawing into the view the application
-     * just moved away from. */
+    /* What the application last asked for, what the queued block is building
+     * for, and what the live window belongs to. The first is the truth: a
+     * pending handle that differs from it is stale by definition. */
+    guintptr _requestedHandle;
+    BOOL _handleWasSet;
     guintptr _pendingHandle;
     guintptr _attachedHandle;
 
@@ -435,38 +388,56 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
  * prerolls is the very thread that has to build the window.  Dispatching and
  * returning lets preroll finish, which releases that thread, which then runs
  * the block. */
-- (BOOL)ensureWindowWithHandle:(guintptr)handle
-                         width:(int)width
-                        height:(int)height
+- (void)setWindowHandle:(guintptr)handle width:(int)width height:(int)height
 {
-    return [self ensureWindowWithHandle:handle width:width height:height
-                          authoritative:NO];
+    BOOL sameAsLive;
+
+    [_renderLock lock];
+    sameAsLive = (_windowReady && _attachedHandle == handle);
+    _requestedHandle = handle;
+    _handleWasSet = YES;
+    [_renderLock unlock];
+
+    /* 0 always closes: in internal-window mode _attachedHandle is 0 as well, so
+     * "are we attached to 0" answers yes, and a detach would otherwise leave the
+     * standalone window frozen on screen for good. */
+    if (handle == 0 || !sameAsLive)
+        [self closeWindow];
+
+    if (handle != 0)
+        [self ensureWindowWithWidth:width height:height];
 }
 
-- (BOOL)ensureWindowWithHandle:(guintptr)handle
-                         width:(int)width
-                        height:(int)height
-                 authoritative:(BOOL)authoritative
+- (BOOL)hasWindowHandle
 {
     [_renderLock lock];
+    BOOL have = (_requestedHandle != 0);
+    [_renderLock unlock];
+    return have;
+}
+
+- (VfMetalWindowState)ensureWindowWithWidth:(int)width height:(int)height
+{
+    guintptr handle;
+
+    [_renderLock lock];
+    handle = _requestedHandle;
+
+    if (handle == 0 && _handleWasSet) {
+        /* The application took its view away. Building an internal window here
+         * is not what a detach asks for. */
+        [_renderLock unlock];
+        return VF_METAL_WINDOW_DETACHED;
+    }
     if (_windowReady && _attachedHandle == handle) {
         [_renderLock unlock];
-        return YES;
+        return VF_METAL_WINDOW_READY;
     }
-    if (_windowPending
-        && (_pendingHandle == handle || !authoritative)) {
-        /* Already queued. A second block would add a second view to the same
-         * parent and orphan the first.
-         *
-         * Also when the queued handle is a DIFFERENT one and this call is not
-         * authoritative: only set_window_handle knows what the application
-         * asked for last. show_frame reaches here with a handle it read a
-         * moment ago, and letting that retire a block queued by a newer
-         * set_window_handle would bind the sink to the view the application
-         * just moved away from -- with no further buffer to correct it if the
-         * pipeline is sitting in PAUSED. */
+    if (_windowPending && _pendingHandle == handle) {
+        /* Already queued for this handle. A second block would add a second
+         * view to the same parent and orphan the first. */
         [_renderLock unlock];
-        return NO;
+        return VF_METAL_WINDOW_PENDING;
     }
     /* Either nothing is queued, or what is queued is for a handle that is no
      * longer the one wanted -- bumping the epoch retires it. */
@@ -613,7 +584,7 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     [_renderLock lock];
     BOOL ready = (_windowReady && _attachedHandle == handle);
     [_renderLock unlock];
-    return ready;
+    return ready ? VF_METAL_WINDOW_READY : VF_METAL_WINDOW_PENDING;
 }
 
 - (void)closeWindow
@@ -653,14 +624,15 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     if (!window && !view)
         return;
 
-    if (!vf_metal_run_on_main_bounded (^{
-                vf_metal_destroy_window (window, view);
-            })) {
-        GST_WARNING ("MetalVideoSinkRenderer: the main queue was not serviced "
-                     "within %g s; leaving the window to be closed by the run "
-                     "loop rather than blocking teardown.",
-                     VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS);
-    }
+    /* Not waited on. The block owns the window and the view outright -- they
+     * came out of the ivars above -- and touches nothing else, so there is
+     * nothing for teardown to wait for. */
+    if ([NSThread isMainThread])
+        vf_metal_destroy_window (window, view);
+    else
+        dispatch_async (dispatch_get_main_queue (), ^{
+            vf_metal_destroy_window (window, view);
+        });
 #endif /* !TARGET_OS_IPHONE */
 }
 
@@ -1037,14 +1009,6 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     BOOL rendered = _renderedAny;
     [_heldLock unlock];
     return rendered;
-}
-
-- (BOOL)isAttachedToHandle:(guintptr)handle
-{
-    [_renderLock lock];
-    BOOL attached = (_windowReady && _attachedHandle == handle);
-    [_renderLock unlock];
-    return attached;
 }
 
 - (void)discardHeldFrame
