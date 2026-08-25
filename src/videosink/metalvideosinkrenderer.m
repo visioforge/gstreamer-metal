@@ -171,6 +171,29 @@ fragment float4 videosinkFragmentI420(
 
 @end
 
+/* Destroys a window and view the caller already owns -- it takes no lock and
+ * touches no ivar, so both the teardown path and a create block that lost its
+ * race can call it without one thread being able to see half a window. Main
+ * thread only. */
+static void
+vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
+{
+    /* Suppress window transition animations to prevent autoreleased
+     * _NSWindowTransformAnimation objects from outliving the window. */
+    [window setAnimationBehavior:NSWindowAnimationBehaviorNone];
+
+    /* Drain animation objects inside this pool while the window hierarchy is
+     * still alive, so their dealloc can't hit freed memory. */
+    @autoreleasepool {
+        [window orderOut:nil];
+
+        [view.layer removeAllAnimations];
+        [view removeFromSuperview];
+    }
+
+    [window close];
+}
+
 #endif /* !TARGET_OS_IPHONE */
 
 /* ============================================================= */
@@ -366,12 +389,12 @@ fragment float4 videosinkFragmentI420(
     [_renderLock unlock];
 
 #if !TARGET_OS_IPHONE
-    /* The lock is held across the whole block, not just around the flags: check
-     * the epoch, build the window and publish _windowReady have to be one step,
-     * or a closeWindow arriving in between invalidates a block that then goes
-     * on to create a window anyway. Everything here runs on the main thread and
-     * takes no other lock, so nothing can invert against it; the streaming
-     * thread waits only as long as building one window takes. */
+    /* The window is built into locals with no lock held, and every ivar is then
+     * assigned in one locked step at the end.  Holding the lock across AppKit
+     * would be the safer-looking shape and is the more dangerous one: it is not
+     * recursive, and anything AppKit does that drains the main queue would
+     * deadlock the main thread against itself -- the exact failure this element
+     * is being fixed for. */
     void (^createBlock)(void) = ^{
         [self->_renderLock lock];
         if (self->_windowEpoch != epoch) {
@@ -379,22 +402,24 @@ fragment float4 videosinkFragmentI420(
             [self->_renderLock unlock];
             return;
         }
+        [self->_renderLock unlock];
+
+        NSWindow *window = nil;
+        VfMetalView *view = nil;
 
         if (handle != 0) {
             /* External mode: embed in provided NSView */
             NSView *parentView = (__bridge NSView *)(void *)handle;
-            self->_renderView =
-                [[VfMetalView alloc] initWithFrame:parentView.bounds];
-            self->_renderView.renderer = self;
-            self->_renderView.autoresizingMask =
-                NSViewWidthSizable | NSViewHeightSizable;
-            [parentView addSubview:self->_renderView];
+            view = [[VfMetalView alloc] initWithFrame:parentView.bounds];
+            view.renderer = self;
+            view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            [parentView addSubview:view];
         } else {
             /* Internal mode: create NSWindow */
             [NSApplication sharedApplication];
 
             NSRect frame = NSMakeRect(100, 100, width, height);
-            self->_internalWindow = [[NSWindow alloc]
+            window = [[NSWindow alloc]
                 initWithContentRect:frame
                           styleMask:NSWindowStyleMaskTitled |
                                     NSWindowStyleMaskClosable |
@@ -402,38 +427,48 @@ fragment float4 videosinkFragmentI420(
                                     NSWindowStyleMaskMiniaturizable
                             backing:NSBackingStoreBuffered
                               defer:NO];
-            self->_internalWindow.title = @"VF Metal Video Sink";
-            self->_internalWindow.releasedWhenClosed = NO;
+            window.title = @"VF Metal Video Sink";
+            window.releasedWhenClosed = NO;
 
-            self->_renderView =
-                [[VfMetalView alloc]
-                    initWithFrame:self->_internalWindow.contentView.bounds];
-            self->_renderView.renderer = self;
-            self->_renderView.autoresizingMask =
-                NSViewWidthSizable | NSViewHeightSizable;
-            [self->_internalWindow.contentView addSubview:self->_renderView];
-            [self->_internalWindow makeKeyAndOrderFront:nil];
+            view = [[VfMetalView alloc]
+                initWithFrame:window.contentView.bounds];
+            view.renderer = self;
+            view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            [window.contentView addSubview:view];
+            [window makeKeyAndOrderFront:nil];
 
             [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         }
 
-        self->_metalLayer = (CAMetalLayer *)self->_renderView.layer;
+        CAMetalLayer *layer = (CAMetalLayer *)view.layer;
 
-        /* Cache view properties for thread-safe access from renderFrame.
-         * These must only be read/written from the main thread. */
-        CGFloat scale = self->_renderView.window.backingScaleFactor;
+        CGFloat scale = view.window.backingScaleFactor;
         if (scale <= 0) scale = 1.0;
-        self->_cachedContentsScale = scale;
-        self->_metalLayer.contentsScale = scale;
+        layer.contentsScale = scale;
 
-        CGSize boundsSize = self->_renderView.bounds.size;
-        self->_cachedDrawableSize = CGSizeMake(
+        CGSize boundsSize = view.bounds.size;
+        CGSize drawableSize = CGSizeMake(
             boundsSize.width * scale, boundsSize.height * scale);
-        self->_metalLayer.drawableSize = self->_cachedDrawableSize;
+        layer.drawableSize = drawableSize;
 
-        /* Published from inside the block, on the main thread, at the point the
-         * window actually exists: "there is a window" and "_windowReady" are
-         * one fact, so closeWindow always finds what this created. */
+        [self->_renderLock lock];
+        if (self->_windowEpoch != epoch) {
+            /* Torn down while this was building. Nothing was published, so this
+             * block still owns what it made and has to undo it. */
+            self->_windowPending = NO;
+            [self->_renderLock unlock];
+            vf_metal_destroy_window (window, view);
+            return;
+        }
+
+        self->_internalWindow = window;
+        self->_renderView = view;
+        self->_metalLayer = layer;
+        self->_cachedContentsScale = scale;
+        self->_cachedDrawableSize = drawableSize;
+
+        /* Published at the point the window actually exists: "there is a
+         * window" and "_windowReady" are one fact. */
         self->_windowReady = YES;
         self->_windowPending = NO;
         [self->_renderLock unlock];
@@ -463,53 +498,29 @@ fragment float4 videosinkFragmentI420(
      * sitting unrun in the main queue, and this is the only thing that stops it
      * putting an NSWindow on screen -- and flipping the process to
      * NSApplicationActivationPolicyRegular -- for an element already torn down. */
-    NSUInteger epoch = ++_windowEpoch;
-    BOOL hadWindow = _windowReady;
+    ++_windowEpoch;
     _windowReady = NO;
     _windowPending = NO;
-    _metalLayer = nil;  /* Nil under lock so renderFrame can't grab it */
+    _cachedDrawableSize = CGSizeZero;
+    _metalLayer = nil;
+#if !TARGET_OS_IPHONE
+    /* Taken out of the ivars here rather than read from them inside the block:
+     * the block then owns what it destroys, so it needs no staleness check and
+     * cannot tear down a window that was recreated behind it. */
+    NSWindow *window = _internalWindow;
+    VfMetalView *view = _renderView;
+    _internalWindow = nil;
+    _renderView = nil;
+#endif
     [_renderLock unlock];
 
-    if (!hadWindow)
+#if !TARGET_OS_IPHONE
+    if (!window && !view)
         return;
 
-#if !TARGET_OS_IPHONE
-    void (^closeBlock)(void) = ^{
-        [self->_renderLock lock];
-        BOOL stale = (self->_windowEpoch != epoch);
-        [self->_renderLock unlock];
-        if (stale)
-            return;
-
-        /* Suppress window transition animations to prevent autoreleased
-         * _NSWindowTransformAnimation objects from outliving the window. */
-        if (self->_internalWindow) {
-            [self->_internalWindow setAnimationBehavior:NSWindowAnimationBehaviorNone];
-        }
-
-        /* Drain animation objects inside this pool while the window
-         * hierarchy is still alive, so their dealloc can't hit freed memory. */
-        @autoreleasepool {
-            if (self->_internalWindow) {
-                [self->_internalWindow orderOut:nil];
-            }
-
-            if (self->_renderView) {
-                [self->_renderView.layer removeAllAnimations];
-                [self->_renderView removeFromSuperview];
-            }
-        }
-
-        /* Now safe to release — all autoreleased animation objects are gone */
-        self->_renderView = nil;
-
-        if (self->_internalWindow) {
-            [self->_internalWindow close];
-            self->_internalWindow = nil;
-        }
-    };
-
-    if (!vf_metal_run_on_main_bounded (closeBlock)) {
+    if (!vf_metal_run_on_main_bounded (^{
+                vf_metal_destroy_window (window, view);
+            })) {
         GST_WARNING ("MetalVideoSinkRenderer: the main queue was not serviced "
                      "within %g s; leaving the window to be closed by the run "
                      "loop rather than blocking teardown.",
