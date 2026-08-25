@@ -60,6 +60,10 @@ struct _GstVfMetalVideoSink
   /* Whether to forward navigation events */
   gboolean handle_events;
 
+  /* Monotonic deadline for the render window to appear, taken on the first
+   * frame that finds it missing. GST_CLOCK_TIME_NONE while none is pending. */
+  GstClockTime window_deadline;
+
   /* Metal rendering engine (opaque Obj-C object, cast to MetalVideoSinkRenderer* in .m) */
   void *renderer;
 };

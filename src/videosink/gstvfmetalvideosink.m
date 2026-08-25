@@ -62,6 +62,12 @@ enum
 #define DEFAULT_FORCE_ASPECT_RATIO TRUE
 #define DEFAULT_ENABLE_NAVIGATION_EVENTS TRUE
 
+/* How long the element keeps dropping frames while it waits for the render
+ * window, before it gives up and says so on the bus. Generous on purpose: the
+ * main thread can legitimately be busy for seconds, and only a process that
+ * never services its main queue at all should reach the error. */
+#define VF_METAL_WINDOW_WAIT_SECONDS 5
+
 /* --- Forward declarations --- */
 
 static void gst_vf_metal_video_sink_video_overlay_init (
@@ -134,19 +140,58 @@ gst_vf_metal_video_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
   MetalVideoSinkRenderer *renderer =
       (__bridge MetalVideoSinkRenderer *)self->renderer;
 
-  /* Ensure window exists (lazy creation on first frame) */
+  /* Window creation is asynchronous: it can only run on the main thread, and
+   * blocking this one until it does is what hung headless processes -- and
+   * deadlocks an AppKit host whose main thread is inside gst_element_get_state()
+   * waiting for this very preroll. So drop frames until the window shows up,
+   * which lets preroll finish and frees that thread to build it. */
   @autoreleasepool {
     if (![renderer ensureWindowWithHandle:self->window_handle
                                     width:GST_VIDEO_SINK_WIDTH (self)
                                    height:GST_VIDEO_SINK_HEIGHT (self)]) {
-      GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
-          ("Could not create the Metal render window."),
-          ("No window handle was supplied through GstVideoOverlay and the main "
-              "thread is not running a Cocoa run loop, so an NSWindow cannot "
-              "be created. Set a window handle, or run this process as an "
-              "AppKit application."));
+      GstClockTime now = gst_util_get_timestamp ();
+
+      if (!GST_CLOCK_TIME_IS_VALID (self->window_deadline)) {
+        self->window_deadline =
+            now + VF_METAL_WINDOW_WAIT_SECONDS * GST_SECOND;
+
+        /* Say so at once rather than only at the deadline: a pipeline shorter
+         * than the wait would otherwise run to EOS having displayed nothing
+         * and reported nothing, which reads as success. */
+        GST_ELEMENT_WARNING (self, RESOURCE, NOT_FOUND,
+            ("The Metal render window does not exist yet; frames are being "
+                "dropped."),
+            ("Window creation is queued on the main thread. If this process "
+                "does not service its main queue the window never appears, and "
+                "this becomes an error after %d s.",
+                VF_METAL_WINDOW_WAIT_SECONDS));
+
+        return GST_FLOW_OK;
+      }
+
+      if (now < self->window_deadline)
+        return GST_FLOW_OK;
+
+      if (self->window_handle != 0)
+        GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
+            ("Could not attach to the Metal render window."),
+            ("A window handle was supplied, but the main thread did not service "
+                "its queue within %d s, so the render view could not be added "
+                "to it. The handle must be an NSView* and this process must run "
+                "a Cocoa run loop.", VF_METAL_WINDOW_WAIT_SECONDS));
+      else
+        GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
+            ("Could not create the Metal render window."),
+            ("No window handle was supplied through GstVideoOverlay, and the "
+                "main thread did not service its queue within %d s, so an "
+                "NSWindow could not be created. Set a window handle through "
+                "GstVideoOverlay, or run this process as an AppKit "
+                "application.", VF_METAL_WINDOW_WAIT_SECONDS));
+
       return GST_FLOW_ERROR;
     }
+
+    self->window_deadline = GST_CLOCK_TIME_NONE;
   }
 
   /* Refresh cached drawable size from view bounds (dispatched to main thread) */
@@ -243,6 +288,7 @@ gst_vf_metal_video_sink_change_state (GstElement * element,
         }
       }
       self->have_info = FALSE;
+      self->window_deadline = GST_CLOCK_TIME_NONE;
       break;
     case GST_STATE_CHANGE_READY_TO_NULL:
       break;
@@ -347,8 +393,8 @@ gst_vf_metal_video_sink_set_window_handle (GstVideoOverlay * overlay,
       if (![renderer ensureWindowWithHandle:handle
                                       width:GST_VIDEO_SINK_WIDTH (self)
                                      height:GST_VIDEO_SINK_HEIGHT (self)])
-        GST_WARNING_OBJECT (self, "Could not attach to the supplied window "
-            "handle; the next frame will report the error on the bus");
+        GST_DEBUG_OBJECT (self, "window creation queued on the main thread; "
+            "frames are dropped until it runs");
     }
   }
 }
@@ -519,6 +565,7 @@ gst_vf_metal_video_sink_init (GstVfMetalVideoSink * self)
   self->have_info = FALSE;
   self->have_render_rect = FALSE;
   self->handle_events = TRUE;
+  self->window_deadline = GST_CLOCK_TIME_NONE;
 
   @autoreleasepool {
     MetalVideoSinkRenderer *renderer =

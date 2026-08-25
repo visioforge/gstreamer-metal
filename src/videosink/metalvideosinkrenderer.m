@@ -34,21 +34,21 @@
 GST_DEBUG_CATEGORY_EXTERN (gst_vf_metal_video_sink_debug);
 #define GST_CAT_DEFAULT gst_vf_metal_video_sink_debug
 
-/* How long a streaming thread is willing to wait for the main queue. */
+/* How long teardown is willing to wait for the main queue. */
 #define VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS 5.0
 
 /* --- Bounded main-queue hop --- */
 
-/* AppKit work must happen on the main thread, but a streaming thread must
- * never block on the main queue without a bound: a process whose main thread
- * runs no Cocoa run loop -- a test host, a console tool, a background service
- * -- never services that queue, and a dispatch_sync onto it wedges the
- * pipeline forever, with no timeout and no error.
+/* AppKit work must happen on the main thread, but nothing here may block on the
+ * main queue without a bound: a process whose main thread runs no Cocoa run
+ * loop -- a test host, a console tool, a background service -- never services
+ * that queue, and a dispatch_sync onto it waits forever.
  *
- * Returns YES if the block ran within the bound.  On NO the block is not
- * cancelled: it still runs if the queue is serviced later, so whatever it was
- * asked to do is not silently dropped.  Callers therefore have to tolerate a
- * late completion -- see how ensureWindowWithHandle: publishes _windowReady. */
+ * The streaming thread does not use this at all: see ensureWindowWithHandle:,
+ * which dispatches and returns. Teardown does, because it has to know whether
+ * the window is gone before the Metal objects behind it are released.
+ *
+ * Returns YES if the block ran within the bound. */
 static BOOL
 vf_metal_run_on_main_bounded (void (^block) (void))
 {
@@ -215,7 +215,15 @@ fragment float4 videosinkFragmentI420(
 
     /* State */
     BOOL _windowReady;
+    BOOL _windowPending;
     BOOL _configured;
+
+    /* Bumped under _renderLock on every window transition. A block dispatched
+     * to the main queue captures the value it was dispatched with and does
+     * nothing if it no longer matches, so a queue that is only serviced much
+     * later cannot create a window for an element that has since been torn
+     * down, nor close one that has since been recreated. */
+    NSUInteger _windowEpoch;
 }
 
 - (instancetype)init
@@ -331,15 +339,42 @@ fragment float4 videosinkFragmentI420(
 
 /* --- Window management --- */
 
+/* Never blocks.  The streaming thread calls this once per frame; it returns NO
+ * until the window exists, and the caller drops the frame and tries again.
+ * Waiting here is what wedged headless processes, and it deadlocks an AppKit
+ * host too: a main thread sitting in gst_element_get_state() while the sink
+ * prerolls is the very thread that has to build the window.  Dispatching and
+ * returning lets preroll finish, which releases that thread, which then runs
+ * the block. */
 - (BOOL)ensureWindowWithHandle:(guintptr)handle
                          width:(int)width
                         height:(int)height
 {
-    if (_windowReady)
+    [_renderLock lock];
+    if (_windowReady) {
+        [_renderLock unlock];
         return YES;
+    }
+    if (_windowPending) {
+        /* Already queued. A second block would add a second view to the same
+         * parent and orphan the first. */
+        [_renderLock unlock];
+        return NO;
+    }
+    _windowPending = YES;
+    NSUInteger epoch = ++_windowEpoch;
+    [_renderLock unlock];
 
 #if !TARGET_OS_IPHONE
     void (^createBlock)(void) = ^{
+        [self->_renderLock lock];
+        BOOL stale = (self->_windowEpoch != epoch);
+        if (stale)
+            self->_windowPending = NO;
+        [self->_renderLock unlock];
+        if (stale)
+            return;
+
         if (handle != 0) {
             /* External mode: embed in provided NSView */
             NSView *parentView = (__bridge NSView *)(void *)handle;
@@ -391,31 +426,30 @@ fragment float4 videosinkFragmentI420(
             boundsSize.width * scale, boundsSize.height * scale);
         self->_metalLayer.drawableSize = self->_cachedDrawableSize;
 
-        /* Published from inside the block, on the main thread: "the window
-         * exists" and "_windowReady" have to be one fact.  Set it in the caller
-         * instead and a block that finishes just after the caller gave up
-         * leaves a window that closeWindow will never tear down. */
+        /* Published from inside the block, on the main thread, at the point the
+         * window actually exists: "there is a window" and "_windowReady" are
+         * one fact, so closeWindow always finds what this created. */
         [self->_renderLock lock];
         self->_windowReady = YES;
+        self->_windowPending = NO;
         [self->_renderLock unlock];
     };
 
-    if (!vf_metal_run_on_main_bounded (createBlock)) {
-        GST_ERROR ("MetalVideoSinkRenderer: the main queue was not serviced "
-                   "within %g s, so the render window could not be created. "
-                   "This process' main thread is not running a Cocoa run loop; "
-                   "supply an NSView through GstVideoOverlay, or run the "
-                   "process as an AppKit application.",
-                   VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS);
-        return NO;
-    }
+    if ([NSThread isMainThread])
+        createBlock ();
+    else
+        dispatch_async (dispatch_get_main_queue (), createBlock);
 #else
     [_renderLock lock];
     _windowReady = YES;
+    _windowPending = NO;
     [_renderLock unlock];
 #endif /* !TARGET_OS_IPHONE */
 
-    return YES;
+    [_renderLock lock];
+    BOOL ready = _windowReady;
+    [_renderLock unlock];
+    return ready;
 }
 
 - (void)closeWindow
@@ -427,11 +461,19 @@ fragment float4 videosinkFragmentI420(
         return;
     }
     _windowReady = NO;
+    _windowPending = NO;
     _metalLayer = nil;  /* Nil under lock so renderFrame can't grab it */
+    NSUInteger epoch = ++_windowEpoch;
     [_renderLock unlock];
 
 #if !TARGET_OS_IPHONE
     void (^closeBlock)(void) = ^{
+        [self->_renderLock lock];
+        BOOL stale = (self->_windowEpoch != epoch);
+        [self->_renderLock unlock];
+        if (stale)
+            return;
+
         /* Suppress window transition animations to prevent autoreleased
          * _NSWindowTransformAnimation objects from outliving the window. */
         if (self->_internalWindow) {
