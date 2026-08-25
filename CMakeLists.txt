@@ -245,9 +245,14 @@ if(BUILD_IOS)
         DESTINATION include/gst-vf-metal
     )
 else()
+    # The plugin is shipped by copying it straight out of the build tree, and CMake would
+    # otherwise bake the pkg-config prefix it linked against into it as an absolute LC_RPATH -
+    # a developer's home directory in a customer binary. Nothing is lost: a GStreamer plugin
+    # resolves its @rpath dependencies through the rpaths of the process that loads it.
     set_target_properties(gstvfmetal PROPERTIES
         PREFIX ""
         SUFFIX ".dylib"
+        SKIP_BUILD_RPATH TRUE
     )
 
     # Install to GStreamer plugin directory
