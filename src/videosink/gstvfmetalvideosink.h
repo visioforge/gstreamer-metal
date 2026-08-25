@@ -66,9 +66,6 @@ struct _GstVfMetalVideoSink
    * read and written under GST_OBJECT_LOCK. */
   GstClockTime window_deadline;
 
-  /* Whether any frame has ever reached the screen, so teardown can say that
-   * none did. Streaming thread only. */
-  gboolean rendered_any;
 
   /* Metal rendering engine (opaque Obj-C object, cast to MetalVideoSinkRenderer* in .m) */
   void *renderer;

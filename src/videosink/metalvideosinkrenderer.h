@@ -51,6 +51,11 @@
  * shows an empty window. */
 - (void)holdFrame:(GstBuffer *)buffer info:(GstVideoInfo *)info;
 - (void)discardHeldFrame;
+
+/* Whether any frame has reached the screen since the last configureWithVideoInfo:.
+ * Asked at teardown, and true for the held frame as well -- that one is drawn
+ * from the main thread, where the element cannot see it happen. */
+- (BOOL)hasRenderedFrame;
 - (void)updateDrawableSize;
 - (void)expose;
 

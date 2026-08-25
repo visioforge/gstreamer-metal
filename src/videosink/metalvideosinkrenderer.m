@@ -245,6 +245,11 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     GstBuffer *_heldFrame;
     GstVideoInfo _heldFrameInfo;
 
+    /* Whether any frame has reached the screen since the last set_caps. Kept
+     * here rather than in the element because the held frame is drawn from the
+     * main thread, where the element's own streaming-thread flag never sees it. */
+    BOOL _renderedAny;
+
     /* Cached view properties (updated on main thread only, read under lock) */
     CGSize _cachedDrawableSize;
     CGFloat _cachedContentsScale;
@@ -376,6 +381,10 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 
     _configured = YES;
 
+    [_frameLock lock];
+    _renderedAny = NO;
+    [_frameLock unlock];
+
     GST_DEBUG ("MetalVideoSinkRenderer: configured %dx%d format=%d",
                width, height, format);
 
@@ -448,7 +457,7 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
             /* External mode: embed in provided NSView */
             NSView *parentView = (__bridge NSView *)(void *)handle;
             view = [[VfMetalView alloc] initWithFrame:parentView.bounds];
-            view.renderer = self;
+            view.renderer = strongSelf;
             view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
             [parentView addSubview:view];
         } else {
@@ -469,7 +478,7 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 
             view = [[VfMetalView alloc]
                 initWithFrame:window.contentView.bounds];
-            view.renderer = self;
+            view.renderer = strongSelf;
             view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
             [window.contentView addSubview:view];
             [window makeKeyAndOrderFront:nil];
@@ -630,7 +639,16 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     return ok;
 }
 
+/* Callers hold _frameLock. */
 - (BOOL)renderFrameLocked:(GstVideoFrame *)frame
+{
+    BOOL ok = [self renderFrameUnsafe:frame];
+    if (ok)
+        _renderedAny = YES;
+    return ok;
+}
+
+- (BOOL)renderFrameUnsafe:(GstVideoFrame *)frame
 {
     [_renderLock lock];
     if (!_windowReady || !_metalLayer || !_configured) {
@@ -856,10 +874,19 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     GstBuffer *buffer;
     GstVideoInfo info;
 
-    [_frameLock lock];
+    /* tryLock, not lock: this runs on the main thread, and the streaming thread
+     * holds _frameLock for the whole of a render including [layer nextDrawable],
+     * which blocks when the drawable pool is empty. If a real frame is being
+     * drawn right now there is nothing for a redraw to add anyway. */
+    if (![_frameLock tryLock])
+        return;
+
+    /* The frame is kept, not consumed: expose has to be able to redraw it every
+     * time the host view is resized while the pipeline sits in PAUSED. It is
+     * released by discardHeldFrame, which the element calls as soon as a real
+     * frame renders and again on teardown. */
     buffer = _heldFrame ? gst_buffer_ref (_heldFrame) : NULL;
     info = _heldFrameInfo;
-    gst_buffer_replace (&_heldFrame, NULL);
 
     if (buffer) {
         if (gst_video_frame_map (&frame, &info, buffer, GST_MAP_READ)) {
@@ -869,6 +896,14 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
         gst_buffer_unref (buffer);
     }
     [_frameLock unlock];
+}
+
+- (BOOL)hasRenderedFrame
+{
+    [_frameLock lock];
+    BOOL rendered = _renderedAny;
+    [_frameLock unlock];
+    return rendered;
 }
 
 - (void)discardHeldFrame

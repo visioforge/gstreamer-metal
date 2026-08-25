@@ -226,8 +226,6 @@ gst_vf_metal_video_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
   @autoreleasepool {
     if (![renderer renderFrame:&frame])
       GST_WARNING_OBJECT (self, "Metal rendering failed");
-    else
-      self->rendered_any = TRUE;
   }
 
   gst_video_frame_unmap (&frame);
@@ -302,24 +300,32 @@ gst_vf_metal_video_sink_change_state (GstElement * element,
         @autoreleasepool {
           MetalVideoSinkRenderer *renderer =
               (__bridge MetalVideoSinkRenderer *)self->renderer;
+
+          /* Asked before the window goes: the answer covers the held frame
+           * too, which is drawn from the main thread where this element never
+           * sees it happen.
+           *
+           * Said here rather than on the first dropped frame. The standard
+           * prepare-window-handle pattern sets the handle from the streaming
+           * thread, so the first buffer routinely beats the main queue even in
+           * a perfectly healthy application -- warning then would put a line on
+           * the bus at every startup. Saying it at teardown, only when nothing
+           * was ever drawn, is exact and silent when all is well. */
+          if (self->have_info && ![renderer hasRenderedFrame])
+            GST_ELEMENT_WARNING (self, RESOURCE, NOT_FOUND,
+                ("No video frame was ever displayed."),
+                ("The Metal render window never appeared, so every frame was "
+                    "dropped. Supply a window handle through GstVideoOverlay, "
+                    "or run this process as an AppKit application."));
+
           [renderer closeWindow];
+          /* Not carried into the next run: it pins this stream's buffer and its
+           * pool, and the next window would open showing the old picture. */
+          [renderer discardHeldFrame];
         }
       }
-      /* Said here rather than on the first dropped frame. The standard
-       * prepare-window-handle pattern sets the handle from the streaming
-       * thread, so the first buffer routinely beats the main queue even in a
-       * perfectly healthy application -- warning then would put a line on the
-       * bus at every startup. Saying it at teardown, only when nothing was
-       * ever drawn, is exact and silent when all is well. */
-      if (self->have_info && !self->rendered_any)
-        GST_ELEMENT_WARNING (self, RESOURCE, NOT_FOUND,
-            ("No video frame was ever displayed."),
-            ("The Metal render window never appeared, so every frame was "
-                "dropped. Supply a window handle through GstVideoOverlay, or "
-                "run this process as an AppKit application."));
 
       self->have_info = FALSE;
-      self->rendered_any = FALSE;
       GST_OBJECT_LOCK (self);
       self->window_deadline = GST_CLOCK_TIME_NONE;
       GST_OBJECT_UNLOCK (self);
@@ -616,7 +622,6 @@ gst_vf_metal_video_sink_init (GstVfMetalVideoSink * self)
   self->have_render_rect = FALSE;
   self->handle_events = TRUE;
   self->window_deadline = GST_CLOCK_TIME_NONE;
-  self->rendered_any = FALSE;
 
   @autoreleasepool {
     MetalVideoSinkRenderer *renderer =
