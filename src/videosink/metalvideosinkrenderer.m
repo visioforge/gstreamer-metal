@@ -241,6 +241,14 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     BOOL _windowPending;
     BOOL _configured;
 
+    /* Which handle the queued block is building for, and which the live window
+     * belongs to. Without these an ensureWindowWithHandle: for a NEW handle
+     * would see _windowPending and defer to a block still building the OLD
+     * one -- and the sink would keep drawing into the view the application
+     * just moved away from. */
+    guintptr _pendingHandle;
+    guintptr _attachedHandle;
+
     /* Bumped under _renderLock on every window transition. A block dispatched
      * to the main queue captures the value it was dispatched with and does
      * nothing if it no longer matches, so a queue that is only serviced much
@@ -374,17 +382,20 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
                         height:(int)height
 {
     [_renderLock lock];
-    if (_windowReady) {
+    if (_windowReady && _attachedHandle == handle) {
         [_renderLock unlock];
         return YES;
     }
-    if (_windowPending) {
-        /* Already queued. A second block would add a second view to the same
-         * parent and orphan the first. */
+    if (_windowPending && _pendingHandle == handle) {
+        /* Already queued for this handle. A second block would add a second
+         * view to the same parent and orphan the first. */
         [_renderLock unlock];
         return NO;
     }
+    /* Either nothing is queued, or what is queued is for a handle that is no
+     * longer the one wanted -- bumping the epoch retires it. */
     _windowPending = YES;
+    _pendingHandle = handle;
     NSUInteger epoch = ++_windowEpoch;
     [_renderLock unlock];
 
@@ -471,6 +482,7 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
          * window" and "_windowReady" are one fact. */
         self->_windowReady = YES;
         self->_windowPending = NO;
+        self->_attachedHandle = handle;
         [self->_renderLock unlock];
     };
 
@@ -501,6 +513,8 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     ++_windowEpoch;
     _windowReady = NO;
     _windowPending = NO;
+    _attachedHandle = 0;
+    _pendingHandle = 0;
     _cachedDrawableSize = CGSizeZero;
     _metalLayer = nil;
 #if !TARGET_OS_IPHONE
@@ -537,13 +551,15 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
  * the rectangle against one size and the projection against another -- a frame
  * offset or stretched for as long as the resize lasts. */
 - (GstVideoRectangle)computeDisplayRectForDrawableSize:(CGSize)drawableSize
+                                            renderRect:(GstVideoRectangle)renderRect
+                                        haveRenderRect:(BOOL)haveRenderRect
 {
     GstVideoRectangle result;
     CGFloat viewW, viewH;
 
-    if (_haveRenderRect) {
-        viewW = _renderRect.w;
-        viewH = _renderRect.h;
+    if (haveRenderRect) {
+        viewW = renderRect.w;
+        viewH = renderRect.h;
     } else if (drawableSize.width > 0 && drawableSize.height > 0) {
         viewW = drawableSize.width;
         viewH = drawableSize.height;
@@ -587,6 +603,8 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     /* Grab local references under lock so closeWindow can't nil them mid-render */
     CAMetalLayer *metalLayer = _metalLayer;
     CGSize drawableSize = _cachedDrawableSize;
+    BOOL haveRenderRect = _haveRenderRect;
+    GstVideoRectangle renderRect = _renderRect;
     [_renderLock unlock];
 
     if (drawableSize.width <= 0 || drawableSize.height <= 0)
@@ -653,7 +671,9 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
         /* Compute display rectangle for aspect ratio, from the same snapshot
          * drawW/drawH came from. */
         GstVideoRectangle displayRect =
-            [self computeDisplayRectForDrawableSize:drawableSize];
+            [self computeDisplayRectForDrawableSize:drawableSize
+                                         renderRect:renderRect
+                                     haveRenderRect:haveRenderRect];
 
         /* Map display rect to NDC coordinates [-1, 1] */
         float x = (2.0f * displayRect.x / drawW) - 1.0f;
@@ -801,11 +821,17 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
 - (void)setRenderRectangleX:(gint)x y:(gint)y
                       width:(gint)width height:(gint)height
 {
+    /* Written from the application thread and read while a frame is being laid
+     * out, so it goes under the same lock as the drawable size -- otherwise a
+     * frame can be positioned against half of the old rectangle and half of the
+     * new one. */
+    [_renderLock lock];
     _haveRenderRect = YES;
     _renderRect.x = x;
     _renderRect.y = y;
     _renderRect.w = width;
     _renderRect.h = height;
+    [_renderLock unlock];
 }
 
 - (void)setHandleEvents:(BOOL)handle
