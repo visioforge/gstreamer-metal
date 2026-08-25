@@ -520,7 +520,12 @@ fragment float4 videosinkFragmentI420(
 
 /* --- Display rectangle calculation --- */
 
-- (GstVideoRectangle)computeDisplayRect
+/* Takes the drawable size rather than reading _cachedDrawableSize: renderFrame
+ * snapshots that under the lock and divides by the snapshot to reach NDC, so
+ * reading the ivar again here would let a resize land in between and compute
+ * the rectangle against one size and the projection against another -- a frame
+ * offset or stretched for as long as the resize lasts. */
+- (GstVideoRectangle)computeDisplayRectForDrawableSize:(CGSize)drawableSize
 {
     GstVideoRectangle result;
     CGFloat viewW, viewH;
@@ -528,9 +533,9 @@ fragment float4 videosinkFragmentI420(
     if (_haveRenderRect) {
         viewW = _renderRect.w;
         viewH = _renderRect.h;
-    } else if (_cachedDrawableSize.width > 0 && _cachedDrawableSize.height > 0) {
-        viewW = _cachedDrawableSize.width;
-        viewH = _cachedDrawableSize.height;
+    } else if (drawableSize.width > 0 && drawableSize.height > 0) {
+        viewW = drawableSize.width;
+        viewH = drawableSize.height;
     } else {
         viewW = _videoWidth;
         viewH = _videoHeight;
@@ -634,8 +639,10 @@ fragment float4 videosinkFragmentI420(
             return NO;
         }
 
-        /* Compute display rectangle for aspect ratio */
-        GstVideoRectangle displayRect = [self computeDisplayRect];
+        /* Compute display rectangle for aspect ratio, from the same snapshot
+         * drawW/drawH came from. */
+        GstVideoRectangle displayRect =
+            [self computeDisplayRectForDrawableSize:drawableSize];
 
         /* Map display rect to NDC coordinates [-1, 1] */
         float x = (2.0f * displayRect.x / drawW) - 1.0f;
@@ -722,24 +729,38 @@ fragment float4 videosinkFragmentI420(
 - (void)updateDrawableSize
 {
 #if !TARGET_OS_IPHONE
-    if (!_renderView)
+    /* Called from the streaming thread, while closeWindow nils these two on the
+     * main thread. Assigning a strong ivar releases what it held, so reading
+     * one unlocked from another thread can hand back a pointer that is freed a
+     * moment later. Take strong local references under the lock and let the
+     * block work from those. */
+    [_renderLock lock];
+    VfMetalView *view = _renderView;
+    CAMetalLayer *layer = _metalLayer;
+    [_renderLock unlock];
+
+    if (!view || !layer)
         return;
 
     void (^updateBlock)(void) = ^{
-        CGSize boundsSize = self->_renderView.bounds.size;
-        CGFloat scale = self->_renderView.window.backingScaleFactor;
+        CGSize boundsSize = view.bounds.size;
+        CGFloat scale = view.window.backingScaleFactor;
         if (scale <= 0) scale = 1.0;
 
         CGSize newSize = CGSizeMake(
             boundsSize.width * scale, boundsSize.height * scale);
 
         if (newSize.width > 0 && newSize.height > 0) {
-            self->_metalLayer.drawableSize = newSize;
-            self->_metalLayer.contentsScale = scale;
+            layer.drawableSize = newSize;
+            layer.contentsScale = scale;
 
             [self->_renderLock lock];
-            self->_cachedDrawableSize = newSize;
-            self->_cachedContentsScale = scale;
+            /* Only if this is still the layer being rendered into: the window
+             * may have been closed or replaced while this block was queued. */
+            if (self->_metalLayer == layer) {
+                self->_cachedDrawableSize = newSize;
+                self->_cachedContentsScale = scale;
+            }
             [self->_renderLock unlock];
         }
     };

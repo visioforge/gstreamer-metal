@@ -386,15 +386,29 @@ gst_vf_metal_video_sink_set_window_handle (GstVideoOverlay * overlay,
   GstVfMetalVideoSink *self = GST_VF_METAL_VIDEO_SINK (overlay);
 
   GST_DEBUG_OBJECT (self, "set_window_handle: %p", (void *)handle);
+
+  if (self->window_handle == handle)
+    return;
+
   self->window_handle = handle;
+  /* A fresh handle gets a fresh grace period before the pipeline is failed. */
+  self->window_deadline = GST_CLOCK_TIME_NONE;
 
   if (self->renderer) {
     @autoreleasepool {
       MetalVideoSinkRenderer *renderer =
           (__bridge MetalVideoSinkRenderer *)self->renderer;
-      if (![renderer ensureWindowWithHandle:handle
-                                      width:GST_VIDEO_SINK_WIDTH (self)
-                                     height:GST_VIDEO_SINK_HEIGHT (self)])
+
+      /* GstVideoOverlay lets the application move the sink to a different
+       * window whenever it likes, so tear the current one down first --
+       * otherwise ensureWindowWithHandle: sees a window it already has and
+       * keeps rendering into the old view. A no-op when there is none. */
+      [renderer closeWindow];
+
+      if (handle != 0
+          && ![renderer ensureWindowWithHandle:handle
+                                         width:GST_VIDEO_SINK_WIDTH (self)
+                                        height:GST_VIDEO_SINK_HEIGHT (self)])
         GST_DEBUG_OBJECT (self, "window creation queued on the main thread; "
             "frames are dropped until it runs");
     }

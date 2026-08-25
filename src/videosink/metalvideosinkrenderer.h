@@ -35,8 +35,9 @@
 - (BOOL)configureWithVideoInfo:(GstVideoInfo *)info;
 
 /* Window management */
-/* Returns NO when the window could not be created -- see the bounded
- * main-queue hop in metalvideosinkrenderer.m. */
+/* Returns YES once the window exists.  Never blocks: creation is queued on the
+ * main thread, so NO means "not yet" and the caller should drop the frame and
+ * ask again. */
 - (BOOL)ensureWindowWithHandle:(guintptr)handle
                          width:(int)width
                         height:(int)height;
