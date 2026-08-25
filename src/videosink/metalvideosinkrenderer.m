@@ -34,6 +34,54 @@
 GST_DEBUG_CATEGORY_EXTERN (gst_vf_metal_video_sink_debug);
 #define GST_CAT_DEFAULT gst_vf_metal_video_sink_debug
 
+/* How long a streaming thread is willing to wait for the main queue. */
+#define VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS 5.0
+
+/* --- Bounded main-queue hop --- */
+
+/* AppKit work must happen on the main thread, but a streaming thread must
+ * never block on the main queue without a bound: a process whose main thread
+ * runs no Cocoa run loop -- a test host, a console tool, a background service
+ * -- never services that queue, and a dispatch_sync onto it wedges the
+ * pipeline forever, with no timeout and no error.
+ *
+ * Returns YES if the block ran to completion. On timeout it returns NO, and
+ * when cancelOnTimeout is set the block does nothing should it ever get to run,
+ * so a run loop that starts later cannot act behind the caller's back. */
+static BOOL
+vf_metal_run_on_main_bounded (void (^block) (void), BOOL cancelOnTimeout)
+{
+    if ([NSThread isMainThread]) {
+        block ();
+        return YES;
+    }
+
+    __block BOOL cancelled = NO;
+    NSLock *guard = [[NSLock alloc] init];
+    dispatch_semaphore_t done = dispatch_semaphore_create (0);
+
+    dispatch_async (dispatch_get_main_queue (), ^{
+        [guard lock];
+        if (!cancelled)
+            block ();
+        [guard unlock];
+        dispatch_semaphore_signal (done);
+    });
+
+    if (dispatch_semaphore_wait (done, dispatch_time (DISPATCH_TIME_NOW,
+                (int64_t) (VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS * NSEC_PER_SEC)))
+        == 0)
+        return YES;
+
+    if (cancelOnTimeout) {
+        [guard lock];
+        cancelled = YES;
+        [guard unlock];
+    }
+
+    return NO;
+}
+
 /* --- Videosink-specific Metal shader source --- */
 
 static NSString *const kVideoSinkShaderSource = @R"(
@@ -296,12 +344,12 @@ fragment float4 videosinkFragmentI420(
 
 /* --- Window management --- */
 
-- (void)ensureWindowWithHandle:(guintptr)handle
+- (BOOL)ensureWindowWithHandle:(guintptr)handle
                          width:(int)width
                         height:(int)height
 {
     if (_windowReady)
-        return;
+        return YES;
 
 #if !TARGET_OS_IPHONE
     void (^createBlock)(void) = ^{
@@ -357,18 +405,23 @@ fragment float4 videosinkFragmentI420(
         self->_metalLayer.drawableSize = self->_cachedDrawableSize;
     };
 
-    if ([NSThread isMainThread]) {
-        createBlock();
-    } else {
-        /* All AppKit operations must happen on the main thread.
-         * Use dispatch_sync to ensure the window is ready before returning. */
-        dispatch_sync (dispatch_get_main_queue (), createBlock);
+    /* Cancel on timeout: a window created minutes later, by a run loop that
+     * only then started, would be worse than none at all. */
+    if (!vf_metal_run_on_main_bounded (createBlock, YES)) {
+        GST_ERROR ("MetalVideoSinkRenderer: the main queue was not serviced "
+                   "within %g s, so the render window could not be created. "
+                   "This process' main thread is not running a Cocoa run loop; "
+                   "supply an NSView through GstVideoOverlay, or run the "
+                   "process as an AppKit application.",
+                   VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS);
+        return NO;
     }
 #endif /* !TARGET_OS_IPHONE */
 
     [_renderLock lock];
     _windowReady = YES;
     [_renderLock unlock];
+    return YES;
 }
 
 - (void)closeWindow
@@ -413,10 +466,13 @@ fragment float4 videosinkFragmentI420(
         }
     };
 
-    if ([NSThread isMainThread]) {
-        closeBlock();
-    } else {
-        dispatch_sync (dispatch_get_main_queue (), closeBlock);
+    /* Do not cancel: if the queue is only serviced later, the window still
+     * wants tearing down. Teardown just refuses to block on it. */
+    if (!vf_metal_run_on_main_bounded (closeBlock, NO)) {
+        GST_WARNING ("MetalVideoSinkRenderer: the main queue was not serviced "
+                     "within %g s; leaving the window to be closed by the run "
+                     "loop rather than blocking teardown.",
+                     VF_METAL_MAIN_QUEUE_TIMEOUT_SECONDS);
     }
 #endif /* !TARGET_OS_IPHONE */
 }

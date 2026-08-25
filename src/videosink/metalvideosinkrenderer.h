@@ -35,7 +35,9 @@
 - (BOOL)configureWithVideoInfo:(GstVideoInfo *)info;
 
 /* Window management */
-- (void)ensureWindowWithHandle:(guintptr)handle
+/* Returns NO when the window could not be created -- see the bounded
+ * main-queue hop in metalvideosinkrenderer.m. */
+- (BOOL)ensureWindowWithHandle:(guintptr)handle
                          width:(int)width
                         height:(int)height;
 - (void)closeWindow;

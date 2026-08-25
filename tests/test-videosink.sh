@@ -121,6 +121,30 @@ run_pipeline "force-aspect-ratio=false" \
     videotestsrc num-buffers=30 ! "video/x-raw,format=BGRA,width=320,height=240" ! \
     vfmetalvideosink force-aspect-ratio=false
 
+# --- 9. Headless process (issue #878) ---
+# gst-launch-1.0 goes through gst_macos_main(), which runs NSApplication on the
+# main thread and hides the hang. This one compiles a harness that does not.
+echo "[Headless process]"
+HEADLESS_SRC="${SCRIPT_DIR}/test-videosink-headless.c"
+HEADLESS_BIN="${BUILD_DIR}/test-videosink-headless"
+TOTAL=$((TOTAL + 1))
+if cc "${HEADLESS_SRC}" -o "${HEADLESS_BIN}" \
+        $(pkg-config --cflags --libs gstreamer-1.0) > /dev/null 2>&1; then
+    # GST_REGISTRY_FORK=no: the scanner helper is resolved from a path compiled
+    # into libgstreamer, which is wrong whenever the SDK was relocated, and the
+    # parent then waits on a child that never answers.
+    if GST_REGISTRY_FORK=no gtimeout 30 "${HEADLESS_BIN}" > /dev/null 2>&1; then
+        echo "  PASS  no main run loop: errors out instead of hanging"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL  no main run loop: errors out instead of hanging"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "  FAIL  headless harness did not compile"
+    FAIL=$((FAIL + 1))
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Video sink results: ${PASS}/${TOTAL} passed, ${FAIL} failed ==="

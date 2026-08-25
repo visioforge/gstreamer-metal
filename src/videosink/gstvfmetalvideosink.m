@@ -79,8 +79,11 @@ G_DEFINE_TYPE_WITH_CODE (GstVfMetalVideoSink, gst_vf_metal_video_sink,
     G_IMPLEMENT_INTERFACE (GST_TYPE_NAVIGATION,
         gst_vf_metal_video_sink_navigation_init));
 
+/* Rank NONE: autovideosink picks a sink by rank, and this one needs an AppKit
+ * host -- see ensureWindowWithHandle: in metalvideosinkrenderer.m.  It is only
+ * ever a deliberate choice, made by name through gst_element_factory_make(). */
 GST_ELEMENT_REGISTER_DEFINE (vfmetalvideosink, "vfmetalvideosink",
-    GST_RANK_MARGINAL, GST_TYPE_VF_METAL_VIDEO_SINK);
+    GST_RANK_NONE, GST_TYPE_VF_METAL_VIDEO_SINK);
 
 /* --- set_caps --- */
 
@@ -133,9 +136,17 @@ gst_vf_metal_video_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
 
   /* Ensure window exists (lazy creation on first frame) */
   @autoreleasepool {
-    [renderer ensureWindowWithHandle:self->window_handle
-                               width:GST_VIDEO_SINK_WIDTH (self)
-                              height:GST_VIDEO_SINK_HEIGHT (self)];
+    if (![renderer ensureWindowWithHandle:self->window_handle
+                                    width:GST_VIDEO_SINK_WIDTH (self)
+                                   height:GST_VIDEO_SINK_HEIGHT (self)]) {
+      GST_ELEMENT_ERROR (self, RESOURCE, NOT_FOUND,
+          ("Could not create the Metal render window."),
+          ("No window handle was supplied through GstVideoOverlay and the main "
+              "thread is not running a Cocoa run loop, so an NSWindow cannot "
+              "be created. Set a window handle, or run this process as an "
+              "AppKit application."));
+      return GST_FLOW_ERROR;
+    }
   }
 
   /* Refresh cached drawable size from view bounds (dispatched to main thread) */
@@ -333,9 +344,11 @@ gst_vf_metal_video_sink_set_window_handle (GstVideoOverlay * overlay,
     @autoreleasepool {
       MetalVideoSinkRenderer *renderer =
           (__bridge MetalVideoSinkRenderer *)self->renderer;
-      [renderer ensureWindowWithHandle:handle
-                                 width:GST_VIDEO_SINK_WIDTH (self)
-                                height:GST_VIDEO_SINK_HEIGHT (self)];
+      if (![renderer ensureWindowWithHandle:handle
+                                      width:GST_VIDEO_SINK_WIDTH (self)
+                                     height:GST_VIDEO_SINK_HEIGHT (self)])
+        GST_WARNING_OBJECT (self, "Could not attach to the supplied window "
+            "handle; the next frame will report the error on the bus");
     }
   }
 }
