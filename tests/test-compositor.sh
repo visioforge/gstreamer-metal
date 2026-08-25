@@ -182,6 +182,20 @@ run_pipeline "I420 output" \
     videotestsrc num-buffers=30 ! \
     vfmetalcompositor ! "video/x-raw,format=I420,width=320,height=240" ! fakesink
 
+# --- 14. Downstream asks for a different size (issue #878) ---
+# Every case above pins the geometry UPSTREAM of the compositor, which is why
+# this went unnoticed: _update_caps used to pin width/height to the input
+# geometry, so any downstream wanting another size intersected to EMPTY and
+# negotiation failed with not-negotiated.
+echo "[Downstream restriction caps]"
+run_pipeline "downstream upscale 320x240 -> 1280x720" \
+    videotestsrc num-buffers=5 ! "video/x-raw,format=RGBA,width=320,height=240,framerate=30/1" ! \
+    vfmetalcompositor ! "video/x-raw,width=1280,height=720" ! fakesink
+
+run_pipeline "downstream downscale + format 640x480 -> I420 320x240" \
+    videotestsrc num-buffers=5 ! "video/x-raw,format=BGRA,width=640,height=480,framerate=30/1" ! \
+    vfmetalcompositor ! "video/x-raw,format=I420,width=320,height=240,framerate=30/1" ! fakesink
+
 # --- Summary ---
 echo ""
 echo "=== Compositor results: ${PASS}/${TOTAL} passed, ${FAIL} failed ==="
