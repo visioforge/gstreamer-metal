@@ -146,7 +146,15 @@ gst_vf_metal_video_sink_show_frame (GstVideoSink * vsink, GstBuffer * buf)
    * blocking this one until it does is what hung headless processes -- and
    * deadlocks an AppKit host whose main thread is inside gst_element_get_state()
    * waiting for this very preroll. So drop frames until the window shows up,
-   * which lets preroll finish and frees that thread to build it. */
+   * which lets preroll finish and frees that thread to build it.
+   *
+   * A dropped frame returns GST_FLOW_OK and not GST_BASE_SINK_FLOW_DROPPED,
+   * which is what that value is nominally for. show_frame maps to both
+   * GstBaseSinkClass.render and .preroll, and the two treat it differently:
+   * gstbasesink.c takes DROPPED back to GST_FLOW_OK on the render path, but on
+   * the preroll path anything other than GST_FLOW_OK goes straight to
+   * preroll_canceled and fails the state change. GST_FLOW_OK is the only value
+   * correct on both. */
   @autoreleasepool {
     if (![renderer ensureWindowWithHandle:self->window_handle
                                     width:GST_VIDEO_SINK_WIDTH (self)
