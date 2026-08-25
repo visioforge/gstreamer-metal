@@ -151,7 +151,7 @@ else
     # GST_REGISTRY_FORK=no: the scanner helper is resolved from a path compiled
     # into libgstreamer, which is wrong whenever the SDK was relocated, and the
     # parent then waits on a child that never answers.
-    HEADLESS_OUT="$(GST_REGISTRY_FORK=no gtimeout 45 "${HEADLESS_BIN}" 2>&1)"
+    HEADLESS_OUT="$(GST_REGISTRY_FORK=no gtimeout 75 "${HEADLESS_BIN}" 2>&1)"
     if [ $? -eq 0 ]; then
         echo "  PASS  no main run loop: errors out instead of hanging"
         PASS=$((PASS + 1))

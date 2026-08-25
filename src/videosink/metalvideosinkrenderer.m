@@ -366,14 +366,19 @@ fragment float4 videosinkFragmentI420(
     [_renderLock unlock];
 
 #if !TARGET_OS_IPHONE
+    /* The lock is held across the whole block, not just around the flags: check
+     * the epoch, build the window and publish _windowReady have to be one step,
+     * or a closeWindow arriving in between invalidates a block that then goes
+     * on to create a window anyway. Everything here runs on the main thread and
+     * takes no other lock, so nothing can invert against it; the streaming
+     * thread waits only as long as building one window takes. */
     void (^createBlock)(void) = ^{
         [self->_renderLock lock];
-        BOOL stale = (self->_windowEpoch != epoch);
-        if (stale)
+        if (self->_windowEpoch != epoch) {
             self->_windowPending = NO;
-        [self->_renderLock unlock];
-        if (stale)
+            [self->_renderLock unlock];
             return;
+        }
 
         if (handle != 0) {
             /* External mode: embed in provided NSView */
@@ -429,7 +434,6 @@ fragment float4 videosinkFragmentI420(
         /* Published from inside the block, on the main thread, at the point the
          * window actually exists: "there is a window" and "_windowReady" are
          * one fact, so closeWindow always finds what this created. */
-        [self->_renderLock lock];
         self->_windowReady = YES;
         self->_windowPending = NO;
         [self->_renderLock unlock];
@@ -454,17 +458,20 @@ fragment float4 videosinkFragmentI420(
 
 - (void)closeWindow
 {
-    /* Mark as not ready first (under lock) to prevent new renders */
     [_renderLock lock];
-    if (!_windowReady) {
-        [_renderLock unlock];
-        return;
-    }
+    /* Bump the epoch even when there is no window yet. A createBlock may be
+     * sitting unrun in the main queue, and this is the only thing that stops it
+     * putting an NSWindow on screen -- and flipping the process to
+     * NSApplicationActivationPolicyRegular -- for an element already torn down. */
+    NSUInteger epoch = ++_windowEpoch;
+    BOOL hadWindow = _windowReady;
     _windowReady = NO;
     _windowPending = NO;
     _metalLayer = nil;  /* Nil under lock so renderFrame can't grab it */
-    NSUInteger epoch = ++_windowEpoch;
     [_renderLock unlock];
+
+    if (!hadWindow)
+        return;
 
 #if !TARGET_OS_IPHONE
     void (^closeBlock)(void) = ^{

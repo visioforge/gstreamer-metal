@@ -63,10 +63,12 @@ enum
 #define DEFAULT_ENABLE_NAVIGATION_EVENTS TRUE
 
 /* How long the element keeps dropping frames while it waits for the render
- * window, before it gives up and says so on the bus. Generous on purpose: the
- * main thread can legitimately be busy for seconds, and only a process that
- * never services its main queue at all should reach the error. */
-#define VF_METAL_WINDOW_WAIT_SECONDS 5
+ * window, before it gives up and says so on the bus. Deliberately far longer
+ * than any transient: a main thread can legitimately be busy for seconds -- a
+ * modal loop, a heavy layout -- and killing a working pipeline over that would
+ * be worse than the wait. Only a process that never services its main queue at
+ * all should reach the error. */
+#define VF_METAL_WINDOW_WAIT_SECONDS 15
 
 /* --- Forward declarations --- */
 

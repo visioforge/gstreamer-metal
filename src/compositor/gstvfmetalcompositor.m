@@ -399,9 +399,9 @@ _should_draw_background (GstVideoAggregator * vagg)
  * intersection with any downstream that wants a different size EMPTY, and
  * negotiation then fails with not-negotiated -- even though the compositor
  * scales and positions every input anyway.  The software compositor leaves them
- * open for the same reason.  The override is kept rather than dropped because
- * the default implementation would express a format preference taken from the
- * inputs, and this element prefers BGRA, which is what its Metal layer uses. */
+ * open for the same reason.  The override is kept rather than dropped so that
+ * the default implementation's format preference, which it derives from the
+ * inputs, does not displace the BGRA that _fixate_caps chooses. */
 static GstCaps *
 _update_caps (GstVideoAggregator * vagg, GstCaps * caps)
 {

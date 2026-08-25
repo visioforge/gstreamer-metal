@@ -18,8 +18,8 @@
  * thread only waits on the bus, exactly like a test host or a console tool.
  *
  * The pipeline is deliberately longer than the sink's own wait, so the error is
- * reached rather than raced: 300 frames at 30 fps is ten seconds of media, and
- * the sink gives the window five.
+ * reached rather than raced: 600 frames at 30 fps is twenty seconds of media,
+ * and the sink gives the window fifteen.
  *
  * PASS: the sink itself reports GST_RESOURCE_ERROR_NOT_FOUND.
  * FAIL: nothing arrives within the window -- that is the hang; or EOS, which
@@ -30,7 +30,7 @@
 
 #include <gst/gst.h>
 
-#define WAIT_SECONDS 30
+#define WAIT_SECONDS 45
 
 int
 main (int argc, char *argv[])
@@ -44,7 +44,7 @@ main (int argc, char *argv[])
 
   gst_init (&argc, &argv);
 
-  pipeline = gst_parse_launch ("videotestsrc num-buffers=300 ! "
+  pipeline = gst_parse_launch ("videotestsrc num-buffers=600 ! "
       "video/x-raw,format=BGRA,width=320,height=240 ! "
       "vfmetalvideosink name=sink", NULL);
   if (pipeline == NULL) {
