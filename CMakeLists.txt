@@ -47,11 +47,20 @@ if(BUILD_IOS)
             "Point it to the GStreamer iOS SDK root directory.")
     endif()
 
-    set(GST_INCLUDE_DIRS
-        "${GSTREAMER_ROOT}/include/gstreamer-1.0"
-        "${GSTREAMER_ROOT}/include/glib-2.0"
-        "${GSTREAMER_ROOT}/lib/glib-2.0/include"
-    )
+    # Two layouts answer to "the GStreamer iOS SDK root": the cerbero dist tree, and the
+    # GStreamer.framework the official installer drops in ~/Library/Developer/GStreamer/iPhone.sdk,
+    # whose headers are one flat directory with no include/ or lib/ at all. Probe for the
+    # framework first - pointing GSTREAMER_ROOT at it and getting "gst/gst.h not found" is the
+    # failure this avoids.
+    if(EXISTS "${GSTREAMER_ROOT}/Headers/gst/gst.h")
+        set(GST_INCLUDE_DIRS "${GSTREAMER_ROOT}/Headers")
+    else()
+        set(GST_INCLUDE_DIRS
+            "${GSTREAMER_ROOT}/include/gstreamer-1.0"
+            "${GSTREAMER_ROOT}/include/glib-2.0"
+            "${GSTREAMER_ROOT}/lib/glib-2.0/include"
+        )
+    endif()
     set(GST_LIBRARY_DIRS "${GSTREAMER_ROOT}/lib")
     set(GST_LIBRARIES
         gstreamer-1.0
