@@ -60,7 +60,7 @@ Metal-accelerated video processing plugin for GStreamer on macOS and iOS. Provid
 ./build.sh --platform=maccatalyst --gst-root=/path/to/GStreamer/iOS/SDK
 ```
 
-The build produces `build/gstvfmetal.dylib` (macOS) or `build/libgstvfmetal.a` (iOS/Catalyst).
+The build produces `build/gstvfmetal.dylib` (macOS), `build-maccatalyst/gstvfmetal.dylib` (Mac Catalyst) or `build-ios/gstvfmetal.a` (iOS).
 
 ## iOS Static Registration
 
