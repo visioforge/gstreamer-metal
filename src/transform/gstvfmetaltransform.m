@@ -297,7 +297,13 @@ gst_vf_metal_transform_before_transform (GstBaseTransform * trans,
     w = h;
     h = t;
   }
-  if (w != GST_VIDEO_INFO_WIDTH (&filter->out_info) ||
+  /* A swap of axes on a non-square PAR inverts the PAR: new caps too. */
+  gboolean par_changes =
+      gst_vf_metal_transform_method_swaps_axes (self->method) !=
+      gst_vf_metal_transform_method_swaps_axes (self->applied_method) &&
+      GST_VIDEO_INFO_PAR_N (&filter->in_info) !=
+      GST_VIDEO_INFO_PAR_D (&filter->in_info);
+  if (par_changes || w != GST_VIDEO_INFO_WIDTH (&filter->out_info) ||
       h != GST_VIDEO_INFO_HEIGHT (&filter->out_info)) {
     GST_OBJECT_UNLOCK (self);
     return;
@@ -325,9 +331,14 @@ gst_vf_metal_transform_set_info (GstVideoFilter * filter,
 
   if (!self->renderer) return FALSE;
 
-  /* The caps were negotiated for the properties as they are now. */
+  /* The caps were negotiated for the properties as they are now. A change
+   * that lands between negotiation and here may not fit these caps: never
+   * pass a buffer through to caps of another size (the pending reconfigure
+   * renegotiates on the next buffer). */
   GST_OBJECT_LOCK (self);
-  gboolean passthrough = gst_vf_metal_transform_apply_locked (self);
+  gboolean passthrough = gst_vf_metal_transform_apply_locked (self) &&
+      GST_VIDEO_INFO_WIDTH (in_info) == GST_VIDEO_INFO_WIDTH (out_info) &&
+      GST_VIDEO_INFO_HEIGHT (in_info) == GST_VIDEO_INFO_HEIGHT (out_info);
   GST_OBJECT_UNLOCK (self);
 
   gst_base_transform_set_passthrough (GST_BASE_TRANSFORM (self), passthrough);

@@ -127,10 +127,14 @@ run_test "auto takes the field order from the caps" \
         video/x-raw,format=BGRA,width=320,height=240,interlace-mode=interleaved,field-order=top-field-first ! \
         vfmetaldeinterlace ! fakesink 2>&1) && echo \"\$out\" | grep -q 'top field first'"
 
-run_test "A progressive frame in a mixed stream is copied" \
-    sh -c "out=\$(GST_DEBUG=vfmetaldeinterlace:6 $GST_LAUNCH videotestsrc num-buffers=3 ! \
-        video/x-raw,format=BGRA,width=320,height=240,interlace-mode=mixed ! \
-        vfmetaldeinterlace ! fakesink 2>&1) && echo \"\$out\" | grep -q 'mixed stream, copied'"
+# 2:3 telecine gives a mixed stream whose buffers flag the interlaced frames.
+run_test "A mixed stream copies progressive frames, deinterlaces flagged ones" \
+    sh -c "out=\$(GST_DEBUG=vfmetaldeinterlace:6 $GST_LAUNCH videotestsrc num-buffers=12 ! \
+        video/x-raw,format=I420,width=320,height=240,framerate=24000/1001 ! \
+        interlace field-pattern=2:3 ! video/x-raw,interlace-mode=mixed ! \
+        vfmetaldeinterlace method=weave ! fakesink 2>&1) && \
+        echo \"\$out\" | grep -q 'mixed stream, copied' && \
+        echo \"\$out\" | grep -q 'deinterlacing, '"
 
 # --- HD content ---
 echo "--- HD content ---"

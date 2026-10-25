@@ -225,6 +225,9 @@ gst_vf_metal_deinterlace_transform_frame (GstVideoFilter * filter,
     GST_LOG_OBJECT (self, "progressive frame in a mixed stream, copied");
     if (!gst_video_frame_copy (outframe, inframe))
       return GST_FLOW_ERROR;
+    /* weave/greedyh must not pair the next interlaced frame with one from
+     * before this progressive run. */
+    [renderer resetHistory];
   } else {
     GST_LOG_OBJECT (self, "deinterlacing, %s field first",
         topFieldFirst ? "top" : "bottom");

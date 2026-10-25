@@ -74,6 +74,6 @@ gst-launch-1.0 videotestsrc ! video/x-raw,format=NV12,width=1920,height=1080 ! \
 - Passthrough mode is automatically enabled when method is `none` and all crop values are 0
 - Properties are thread-safe and can be changed during playback
 - Crop is applied before the transform operation, in input coordinates
-- The output size follows: the crop reduces it, and `clockwise`, `counterclockwise`, `upper-left-diagonal` and `upper-right-diagonal` swap width and height (and invert a non-square pixel aspect ratio). A change of method or crop during playback renegotiates the caps
+- The output size follows: the crop reduces it, and `clockwise`, `counterclockwise`, `upper-left-diagonal` and `upper-right-diagonal` swap width and height (and invert a non-square pixel aspect ratio). A change of method or crop during playback renegotiates the caps; a change that alters the output size needs a downstream that accepts new caps mid-stream (an encoder or muxer usually does not, and the stream then fails with `not-negotiated`)
 - Classification: `Filter/Effect/Video`
 - Rank: `GST_RANK_NONE`
