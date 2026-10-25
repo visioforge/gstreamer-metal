@@ -120,6 +120,18 @@ for method in bob weave linear greedyh; do
             "video/x-raw,interlace-mode=progressive" ! fakesink
 done
 
+# --- Field order and mixed streams (read from the element's log) ---
+echo "--- Field order and mixed streams ---"
+run_test "auto takes the field order from the caps" \
+    sh -c "GST_DEBUG=vfmetaldeinterlace:6 $GST_LAUNCH videotestsrc num-buffers=3 ! \
+        video/x-raw,format=BGRA,width=320,height=240,interlace-mode=interleaved,field-order=top-field-first ! \
+        vfmetaldeinterlace ! fakesink 2>&1 | grep -q 'top field first'"
+
+run_test "A progressive frame in a mixed stream is copied" \
+    sh -c "GST_DEBUG=vfmetaldeinterlace:6 $GST_LAUNCH videotestsrc num-buffers=3 ! \
+        video/x-raw,format=BGRA,width=320,height=240,interlace-mode=mixed ! \
+        vfmetaldeinterlace ! fakesink 2>&1 | grep -q 'mixed stream, copied'"
+
 # --- HD content ---
 echo "--- HD content ---"
 run_test "Bob 1080p BGRA" \

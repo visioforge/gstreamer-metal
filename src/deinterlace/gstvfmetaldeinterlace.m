@@ -207,15 +207,10 @@ gst_vf_metal_deinterlace_transform_frame (GstVideoFilter * filter,
   } else if (fieldLayout == 2) {
     topFieldFirst = 0;
   } else {
-    /* Auto: check buffer flags */
-    GstBuffer *buf = inframe->buffer;
-    if (buf) {
-      if (GST_BUFFER_FLAG_IS_SET (buf, GST_VIDEO_BUFFER_FLAG_TFF)) {
-        topFieldFirst = 1;
-      } else {
-        topFieldFirst = 0;
-      }
-    }
+    /* Auto: the frame flags carry the caps field-order, else the buffer's
+     * TFF flag (gst_video_frame_map); progressive caps carry neither. */
+    topFieldFirst = GST_VIDEO_FRAME_IS_TFF (inframe) ||
+        GST_BUFFER_FLAG_IS_SET (inframe->buffer, GST_VIDEO_BUFFER_FLAG_TFF);
   }
 
   DeinterlaceParams params;
@@ -223,10 +218,21 @@ gst_vf_metal_deinterlace_transform_frame (GstVideoFilter * filter,
   params.topFieldFirst = topFieldFirst;
   params.motionThreshold = motionThreshold;
 
-  @autoreleasepool {
-    if (![renderer processFrame:inframe output:outframe params:&params]) {
-      GST_WARNING_OBJECT (self, "Metal rendering failed");
+  /* In a mixed stream a frame its buffer does not flag as interlaced is
+   * progressive already: copy it rather than halve its vertical detail. */
+  if (GST_VIDEO_INFO_INTERLACE_MODE (&inframe->info) ==
+      GST_VIDEO_INTERLACE_MODE_MIXED && !GST_VIDEO_FRAME_IS_INTERLACED (inframe)) {
+    GST_LOG_OBJECT (self, "progressive frame in a mixed stream, copied");
+    if (!gst_video_frame_copy (outframe, inframe))
       return GST_FLOW_ERROR;
+  } else {
+    GST_LOG_OBJECT (self, "deinterlacing, %s field first",
+        topFieldFirst ? "top" : "bottom");
+    @autoreleasepool {
+      if (![renderer processFrame:inframe output:outframe params:&params]) {
+        GST_WARNING_OBJECT (self, "Metal rendering failed");
+        return GST_FLOW_ERROR;
+      }
     }
   }
 
