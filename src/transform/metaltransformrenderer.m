@@ -277,20 +277,20 @@ build_uv_transform (VfMetalTransformMethod method, float *mat, float *offset)
         float transMat[4], transOff[2];
         build_uv_transform (params->method, transMat, transOff);
 
-        /* Combine: first apply crop scale, then transform rotation
-         * UV = transform * (crop_scale * centered_uv) + offsets
-         * Combined matrix = transform * diag(cropScale)
+        /* The crop is in input coordinates (crop-left is the input's left
+         * edge whatever the method), so it is applied after the transform
+         * maps the output coordinate into the input's frame:
+         * UV = diag(cropScale) * (transform * centered_uv) + crop offset
+         * Combined matrix = diag(cropScale) * transform: row 0 (input u)
+         * scales by cropScaleX, row 1 (input v) by cropScaleY.
          */
         uniforms.uvTransform[0] = transMat[0] * cropScaleX;
-        uniforms.uvTransform[1] = transMat[1] * cropScaleX;
-        uniforms.uvTransform[2] = transMat[2] * cropScaleY;
+        uniforms.uvTransform[1] = transMat[1] * cropScaleY;
+        uniforms.uvTransform[2] = transMat[2] * cropScaleX;
         uniforms.uvTransform[3] = transMat[3] * cropScaleY;
 
-        /* Offset: transform the crop offset, then add transform offset */
-        uniforms.uvOffset[0] = transMat[0] * cropOffsetX +
-                               transMat[2] * cropOffsetY + transOff[0];
-        uniforms.uvOffset[1] = transMat[1] * cropOffsetX +
-                               transMat[3] * cropOffsetY + transOff[1];
+        uniforms.uvOffset[0] = cropOffsetX + transOff[0];
+        uniforms.uvOffset[1] = cropOffsetY + transOff[1];
 
         uniforms.colorMatrix = vf_metal_color_matrix_for_frame (inFrame);
         uniforms.padding = 0;
