@@ -49,6 +49,8 @@ typedef struct {
               output:(GstVideoFrame *)outFrame
               params:(const DeinterlaceParams *)params;
 
+/* Forget the previous frame: the next weave/greedyh frame falls back to bob. */
+- (void)resetHistory;
 - (void)cleanup;
 
 @end

@@ -120,6 +120,40 @@ G_DEFINE_TYPE (GstVfMetalDeinterlace, gst_vf_metal_deinterlace,
 GST_ELEMENT_REGISTER_DEFINE (vfmetaldeinterlace, "vfmetaldeinterlace",
     GST_RANK_NONE, GST_TYPE_VF_METAL_DEINTERLACE);
 
+/* --- transform_caps --- */
+
+/* Every output frame is progressive, whatever came in: the src side says
+ * so, and the sink side accepts any interlace mode. */
+static GstCaps *
+gst_vf_metal_deinterlace_transform_caps (GstBaseTransform * trans,
+    GstPadDirection direction, GstCaps * caps, GstCaps * filter)
+{
+  GstCaps *ret = gst_caps_copy (caps);
+
+  for (guint i = 0; i < gst_caps_get_size (ret); i++) {
+    GstStructure *s = gst_caps_get_structure (ret, i);
+    gst_structure_remove_field (s, "field-order");
+    if (direction == GST_PAD_SINK) {
+      gst_structure_set (s, "interlace-mode", G_TYPE_STRING, "progressive",
+          NULL);
+    } else {
+      gst_structure_remove_field (s, "interlace-mode");
+    }
+  }
+
+  if (filter) {
+    GstCaps *tmp = gst_caps_intersect_full (filter, ret,
+        GST_CAPS_INTERSECT_FIRST);
+    gst_caps_unref (ret);
+    ret = tmp;
+  }
+
+  GST_DEBUG_OBJECT (trans, "transformed %" GST_PTR_FORMAT " to %"
+      GST_PTR_FORMAT, caps, ret);
+
+  return ret;
+}
+
 /* --- set_info --- */
 
 static gboolean
@@ -173,15 +207,10 @@ gst_vf_metal_deinterlace_transform_frame (GstVideoFilter * filter,
   } else if (fieldLayout == 2) {
     topFieldFirst = 0;
   } else {
-    /* Auto: check buffer flags */
-    GstBuffer *buf = inframe->buffer;
-    if (buf) {
-      if (GST_BUFFER_FLAG_IS_SET (buf, GST_VIDEO_BUFFER_FLAG_TFF)) {
-        topFieldFirst = 1;
-      } else {
-        topFieldFirst = 0;
-      }
-    }
+    /* Auto: the frame flags carry the caps field-order, else the buffer's
+     * TFF flag (gst_video_frame_map); progressive caps carry neither. */
+    topFieldFirst = GST_VIDEO_FRAME_IS_TFF (inframe) ||
+        GST_BUFFER_FLAG_IS_SET (inframe->buffer, GST_VIDEO_BUFFER_FLAG_TFF);
   }
 
   DeinterlaceParams params;
@@ -189,12 +218,31 @@ gst_vf_metal_deinterlace_transform_frame (GstVideoFilter * filter,
   params.topFieldFirst = topFieldFirst;
   params.motionThreshold = motionThreshold;
 
-  @autoreleasepool {
-    if (![renderer processFrame:inframe output:outframe params:&params]) {
-      GST_WARNING_OBJECT (self, "Metal rendering failed");
+  /* In a mixed stream a frame its buffer does not flag as interlaced is
+   * progressive already: copy it rather than halve its vertical detail. */
+  if (GST_VIDEO_INFO_INTERLACE_MODE (&inframe->info) ==
+      GST_VIDEO_INTERLACE_MODE_MIXED && !GST_VIDEO_FRAME_IS_INTERLACED (inframe)) {
+    GST_LOG_OBJECT (self, "progressive frame in a mixed stream, copied");
+    if (!gst_video_frame_copy (outframe, inframe))
       return GST_FLOW_ERROR;
+    /* weave/greedyh must not pair the next interlaced frame with one from
+     * before this progressive run. */
+    [renderer resetHistory];
+  } else {
+    GST_LOG_OBJECT (self, "deinterlacing, %s field first",
+        topFieldFirst ? "top" : "bottom");
+    @autoreleasepool {
+      if (![renderer processFrame:inframe output:outframe params:&params]) {
+        GST_WARNING_OBJECT (self, "Metal rendering failed");
+        return GST_FLOW_ERROR;
+      }
     }
   }
+
+  /* The base class copied the input's field flags onto the output. */
+  GST_BUFFER_FLAG_UNSET (outframe->buffer, GST_VIDEO_BUFFER_FLAG_INTERLACED |
+      GST_VIDEO_BUFFER_FLAG_TFF | GST_VIDEO_BUFFER_FLAG_RFF |
+      GST_VIDEO_BUFFER_FLAG_ONEFIELD);
 
   return GST_FLOW_OK;
 }
@@ -306,6 +354,7 @@ gst_vf_metal_deinterlace_class_init (GstVfMetalDeinterlaceClass * klass)
 {
   GObjectClass *gobject_class = (GObjectClass *) klass;
   GstElementClass *gstelement_class = (GstElementClass *) klass;
+  GstBaseTransformClass *basetransform_class = (GstBaseTransformClass *) klass;
   GstVideoFilterClass *gstvideofilter_class = (GstVideoFilterClass *) klass;
 
   gobject_class->set_property = gst_vf_metal_deinterlace_set_property;
@@ -314,6 +363,9 @@ gst_vf_metal_deinterlace_class_init (GstVfMetalDeinterlaceClass * klass)
 
   gstelement_class->change_state =
       GST_DEBUG_FUNCPTR (gst_vf_metal_deinterlace_change_state);
+
+  basetransform_class->transform_caps =
+      GST_DEBUG_FUNCPTR (gst_vf_metal_deinterlace_transform_caps);
 
   gstvideofilter_class->set_info =
       GST_DEBUG_FUNCPTR (gst_vf_metal_deinterlace_set_info);

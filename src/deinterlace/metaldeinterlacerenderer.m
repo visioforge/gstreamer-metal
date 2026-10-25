@@ -412,6 +412,11 @@ typedef struct {
     }
 }
 
+- (void)resetHistory
+{
+    _hasPrevFrame = NO;
+}
+
 - (void)cleanup
 {
     [_textureCache clear];

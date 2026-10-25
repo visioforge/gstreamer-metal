@@ -108,6 +108,34 @@ run_test "Bottom-field-first" \
         vfmetaldeinterlace method=bob field-layout=bottom-field-first ! \
         fakesink
 
+# --- Output caps ---
+# The output is progressive: a capsfilter after the element that asks for it
+# fails negotiation otherwise.
+echo "--- Output caps ---"
+for method in bob weave linear greedyh; do
+    run_test "$method output is progressive" \
+        $GST_LAUNCH videotestsrc num-buffers=5 ! \
+            "video/x-raw,format=BGRA,width=640,height=480,interlace-mode=interleaved,field-order=top-field-first" ! \
+            vfmetaldeinterlace method=$method ! \
+            "video/x-raw,interlace-mode=progressive" ! fakesink
+done
+
+# --- Field order and mixed streams (read from the element's log) ---
+echo "--- Field order and mixed streams ---"
+run_test "auto takes the field order from the caps" \
+    sh -c "out=\$(GST_DEBUG=vfmetaldeinterlace:6 $GST_LAUNCH videotestsrc num-buffers=3 ! \
+        video/x-raw,format=BGRA,width=320,height=240,interlace-mode=interleaved,field-order=top-field-first ! \
+        vfmetaldeinterlace ! fakesink 2>&1) && echo \"\$out\" | grep -q 'top field first'"
+
+# 2:3 telecine gives a mixed stream whose buffers flag the interlaced frames.
+run_test "A mixed stream copies progressive frames, deinterlaces flagged ones" \
+    sh -c "out=\$(GST_DEBUG=vfmetaldeinterlace:6 $GST_LAUNCH videotestsrc num-buffers=12 ! \
+        video/x-raw,format=I420,width=320,height=240,framerate=24000/1001 ! \
+        interlace field-pattern=2:3 ! video/x-raw,interlace-mode=mixed ! \
+        vfmetaldeinterlace method=weave ! fakesink 2>&1) && \
+        echo \"\$out\" | grep -q 'mixed stream, copied' && \
+        echo \"\$out\" | grep -q 'deinterlacing, '"
+
 # --- HD content ---
 echo "--- HD content ---"
 run_test "Bob 1080p BGRA" \

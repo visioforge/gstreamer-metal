@@ -121,6 +121,49 @@ run_test "Crop + horizontal-flip" \
         vfmetaltransform method=horizontal-flip crop-left=50 crop-right=50 ! \
         fakesink
 
+# --- Output size ---
+# A capsfilter after the element pins the size the method and crop must
+# produce: a wrong size fails negotiation.
+echo "--- Output size ---"
+for method in clockwise counterclockwise upper-left-diagonal upper-right-diagonal; do
+    run_test "$method swaps width and height" \
+        $GST_LAUNCH videotestsrc num-buffers=3 ! \
+            "video/x-raw,format=BGRA,width=640,height=480" ! \
+            vfmetaltransform method=$method ! \
+            "video/x-raw,width=480,height=640" ! fakesink
+done
+
+run_test "Crop reduces the size" \
+    $GST_LAUNCH videotestsrc num-buffers=3 ! \
+        "video/x-raw,format=NV12,width=640,height=480" ! \
+        vfmetaltransform crop-top=40 crop-left=100 crop-right=60 ! \
+        "video/x-raw,width=480,height=440" ! fakesink
+
+run_test "Crop is in input coordinates, then rotated" \
+    $GST_LAUNCH videotestsrc num-buffers=3 ! \
+        "video/x-raw,format=BGRA,width=640,height=480" ! \
+        vfmetaltransform method=clockwise crop-top=20 crop-bottom=20 ! \
+        "video/x-raw,width=440,height=640" ! fakesink
+
+run_test "Rotation inverts the pixel aspect ratio" \
+    $GST_LAUNCH videotestsrc num-buffers=3 ! \
+        "video/x-raw,format=BGRA,width=640,height=480,pixel-aspect-ratio=2/1" ! \
+        vfmetaltransform method=counterclockwise ! \
+        "video/x-raw,width=480,height=640,pixel-aspect-ratio=1/2" ! fakesink
+
+run_test "An unknown pixel aspect ratio (0/1) rotates without a critical" \
+    sh -c "out=\$($GST_LAUNCH videotestsrc num-buffers=3 ! \
+        video/x-raw,format=BGRA,width=640,height=480,pixel-aspect-ratio=0/1 ! \
+        vfmetaltransform method=clockwise ! \
+        video/x-raw,width=480,height=640,pixel-aspect-ratio=0/1 ! fakesink 2>&1) && \
+        ! echo \"\$out\" | grep -q CRITICAL"
+
+run_test "A list of sizes from upstream negotiates" \
+    $GST_LAUNCH videotestsrc num-buffers=3 ! \
+        "video/x-raw,format=BGRA,width={ 640, 1280 },height={ 480, 720 }" ! \
+        vfmetaltransform method=clockwise crop-left=40 ! \
+        "video/x-raw,width=480,height=600" ! fakesink
+
 # --- HD content ---
 echo "--- HD content ---"
 run_test "1080p clockwise" \

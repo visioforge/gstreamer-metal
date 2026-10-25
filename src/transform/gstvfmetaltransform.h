@@ -49,6 +49,14 @@ struct _GstVfMetalTransform
   gint crop_left;
   gint crop_right;
 
+  /* The properties the current caps were negotiated for (set_info);
+   * transform_frame renders with these, not the live ones. */
+  gint applied_method;
+  gint applied_crop_top;
+  gint applied_crop_bottom;
+  gint applied_crop_left;
+  gint applied_crop_right;
+
   /* Metal rendering engine */
   void *renderer;
 };

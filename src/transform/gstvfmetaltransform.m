@@ -108,22 +108,214 @@ G_DEFINE_TYPE (GstVfMetalTransform, gst_vf_metal_transform,
 GST_ELEMENT_REGISTER_DEFINE (vfmetaltransform, "vfmetaltransform",
     GST_RANK_NONE, GST_TYPE_VF_METAL_TRANSFORM);
 
-/* --- Passthrough check --- */
+/* --- transform_caps --- */
 
-static void
-gst_vf_metal_transform_update_passthrough (GstVfMetalTransform * self)
+static gboolean
+gst_vf_metal_transform_method_swaps_axes (int method)
 {
+  return method == VF_METAL_TRANSFORM_90R || method == VF_METAL_TRANSFORM_90L ||
+      method == VF_METAL_TRANSFORM_UL_LR || method == VF_METAL_TRANSFORM_UR_LL;
+}
+
+/* Shifts a width or height value (an int, an int range or a list of them)
+ * by @delta. Values that would leave [1, G_MAXINT] are dropped, and FALSE
+ * means none is left. A range keeps its step when the shift preserves the
+ * alignment. */
+static gboolean
+gst_vf_metal_transform_shift_dimension (const GValue * src, gint64 delta,
+    GValue * dest)
+{
+  if (G_VALUE_HOLDS_INT (src)) {
+    gint64 v = (gint64) g_value_get_int (src) + delta;
+    if (v < 1 || v > G_MAXINT)
+      return FALSE;
+    g_value_init (dest, G_TYPE_INT);
+    g_value_set_int (dest, (gint) v);
+    return TRUE;
+  }
+
+  if (GST_VALUE_HOLDS_INT_RANGE (src)) {
+    gint64 step = gst_value_get_int_range_step (src);
+    if (delta % step != 0)
+      step = 1;
+    gint64 min = (gint64) gst_value_get_int_range_min (src) + delta;
+    gint64 max = (gint64) gst_value_get_int_range_max (src) + delta;
+    if (min < 1)
+      min = step;
+    if (max > G_MAXINT)
+      max = (G_MAXINT / step) * step;
+    if (min > max)
+      return FALSE;
+    if (min == max) {
+      g_value_init (dest, G_TYPE_INT);
+      g_value_set_int (dest, (gint) min);
+    } else {
+      g_value_init (dest, GST_TYPE_INT_RANGE);
+      gst_value_set_int_range_step (dest, (gint) min, (gint) max, (gint) step);
+    }
+    return TRUE;
+  }
+
+  if (GST_VALUE_HOLDS_LIST (src)) {
+    GValue list = G_VALUE_INIT;
+    g_value_init (&list, GST_TYPE_LIST);
+    for (guint i = 0; i < gst_value_list_get_size (src); i++) {
+      GValue v = G_VALUE_INIT;
+      if (gst_vf_metal_transform_shift_dimension (
+              gst_value_list_get_value (src, i), delta, &v))
+        gst_value_list_append_and_take_value (&list, &v);
+    }
+    if (gst_value_list_get_size (&list) == 0) {
+      g_value_unset (&list);
+      return FALSE;
+    }
+    *dest = list;
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+/* The crop is in input coordinates and comes first, the rotation second:
+ * sink -> src removes the crop, then swaps the axes; src -> sink undoes the
+ * swap, then adds the crop back. The shape of videocrop ! videoflip. */
+static GstCaps *
+gst_vf_metal_transform_transform_caps (GstBaseTransform * trans,
+    GstPadDirection direction, GstCaps * caps, GstCaps * filter)
+{
+  GstVfMetalTransform *self = GST_VF_METAL_TRANSFORM (trans);
+  GstCaps *ret = gst_caps_new_empty ();
+
   GST_OBJECT_LOCK (self);
-  gboolean passthrough =
-      (self->method == 0) &&
-      (self->crop_top == 0) &&
-      (self->crop_bottom == 0) &&
-      (self->crop_left == 0) &&
-      (self->crop_right == 0);
+  gboolean swap = gst_vf_metal_transform_method_swaps_axes (self->method);
+  gint64 dx = (gint64) self->crop_left + self->crop_right;
+  gint64 dy = (gint64) self->crop_top + self->crop_bottom;
   GST_OBJECT_UNLOCK (self);
 
-  gst_base_transform_set_passthrough (GST_BASE_TRANSFORM (self), passthrough);
-  GST_DEBUG_OBJECT (self, "passthrough = %s", passthrough ? "TRUE" : "FALSE");
+  if (direction == GST_PAD_SINK) {
+    dx = -dx;
+    dy = -dy;
+  }
+
+  for (guint i = 0; i < gst_caps_get_size (caps); i++) {
+    GstStructure *s = gst_structure_copy (gst_caps_get_structure (caps, i));
+    const GValue *w = gst_structure_get_value (s, "width");
+    const GValue *h = gst_structure_get_value (s, "height");
+    /* The input frame's axes: on the src side they are swapped. */
+    const GValue *in_w = (direction == GST_PAD_SRC && swap) ? h : w;
+    const GValue *in_h = (direction == GST_PAD_SRC && swap) ? w : h;
+    GValue new_w = G_VALUE_INIT, new_h = G_VALUE_INIT;
+
+    if ((in_w && !gst_vf_metal_transform_shift_dimension (in_w, dx, &new_w)) ||
+        (in_h && !gst_vf_metal_transform_shift_dimension (in_h, dy, &new_h))) {
+      if (G_IS_VALUE (&new_w))
+        g_value_unset (&new_w);
+      GST_DEBUG_OBJECT (self, "no size left in %" GST_PTR_FORMAT, s);
+      gst_structure_free (s);
+      continue;
+    }
+
+    /* new_w/new_h are along the input's axes; sink -> src swaps them. */
+    gboolean out_swap = direction == GST_PAD_SINK && swap;
+    GValue *out_w = out_swap ? &new_h : &new_w;
+    GValue *out_h = out_swap ? &new_w : &new_h;
+    gst_structure_remove_fields (s, "width", "height", NULL);
+    if (G_IS_VALUE (out_w))
+      gst_structure_take_value (s, "width", out_w);
+    if (G_IS_VALUE (out_h))
+      gst_structure_take_value (s, "height", out_h);
+
+    gint par_n, par_d;
+    if (swap && gst_structure_get_fraction (s, "pixel-aspect-ratio",
+            &par_n, &par_d) && par_n != par_d && par_n != 0) {
+      gst_structure_set (s, "pixel-aspect-ratio", GST_TYPE_FRACTION,
+          par_d, par_n, NULL);
+    }
+
+    gst_caps_append_structure_full (ret, s,
+        gst_caps_features_copy (gst_caps_get_features (caps, i)));
+  }
+
+  if (filter) {
+    GstCaps *tmp = gst_caps_intersect_full (filter, ret,
+        GST_CAPS_INTERSECT_FIRST);
+    gst_caps_unref (ret);
+    ret = tmp;
+  }
+
+  GST_DEBUG_OBJECT (self, "transformed %" GST_PTR_FORMAT " to %"
+      GST_PTR_FORMAT, caps, ret);
+
+  return ret;
+}
+
+/* --- Applying the properties --- */
+
+/* Makes the live properties the ones transform_frame renders with. Called
+ * with the object lock held; returns whether they make a passthrough. */
+static gboolean
+gst_vf_metal_transform_apply_locked (GstVfMetalTransform * self)
+{
+  self->applied_method = self->method;
+  self->applied_crop_top = self->crop_top;
+  self->applied_crop_bottom = self->crop_bottom;
+  self->applied_crop_left = self->crop_left;
+  self->applied_crop_right = self->crop_right;
+  return self->method == 0 && self->crop_top == 0 && self->crop_bottom == 0 &&
+      self->crop_left == 0 && self->crop_right == 0;
+}
+
+/* A change that leaves the output size alone renegotiates to the same caps,
+ * and basetransform skips set_info for those: apply it here, on the
+ * streaming thread, before the buffer. A change of size waits for set_info. */
+static void
+gst_vf_metal_transform_before_transform (GstBaseTransform * trans,
+    GstBuffer * buffer)
+{
+  GstVfMetalTransform *self = GST_VF_METAL_TRANSFORM (trans);
+  GstVideoFilter *filter = GST_VIDEO_FILTER (trans);
+
+  if (!filter->negotiated)
+    return;
+
+  GST_OBJECT_LOCK (self);
+  if (self->method == self->applied_method &&
+      self->crop_top == self->applied_crop_top &&
+      self->crop_bottom == self->applied_crop_bottom &&
+      self->crop_left == self->applied_crop_left &&
+      self->crop_right == self->applied_crop_right) {
+    GST_OBJECT_UNLOCK (self);
+    return;
+  }
+
+  gint64 w = (gint64) GST_VIDEO_INFO_WIDTH (&filter->in_info) -
+      self->crop_left - self->crop_right;
+  gint64 h = (gint64) GST_VIDEO_INFO_HEIGHT (&filter->in_info) -
+      self->crop_top - self->crop_bottom;
+  if (gst_vf_metal_transform_method_swaps_axes (self->method)) {
+    gint64 t = w;
+    w = h;
+    h = t;
+  }
+  /* A swap of axes on a non-square PAR inverts the PAR: new caps too. */
+  gboolean par_changes =
+      gst_vf_metal_transform_method_swaps_axes (self->method) !=
+      gst_vf_metal_transform_method_swaps_axes (self->applied_method) &&
+      GST_VIDEO_INFO_PAR_N (&filter->in_info) !=
+      GST_VIDEO_INFO_PAR_D (&filter->in_info) &&
+      GST_VIDEO_INFO_PAR_N (&filter->in_info) != 0;
+  if (par_changes || w != GST_VIDEO_INFO_WIDTH (&filter->out_info) ||
+      h != GST_VIDEO_INFO_HEIGHT (&filter->out_info)) {
+    GST_OBJECT_UNLOCK (self);
+    return;
+  }
+
+  gboolean passthrough = gst_vf_metal_transform_apply_locked (self);
+  GST_OBJECT_UNLOCK (self);
+
+  gst_base_transform_set_passthrough (trans, passthrough);
+  GST_DEBUG_OBJECT (self, "applied at the same size, passthrough = %s",
+      passthrough ? "TRUE" : "FALSE");
 }
 
 /* --- set_info --- */
@@ -139,6 +331,19 @@ gst_vf_metal_transform_set_info (GstVideoFilter * filter,
       " out=%" GST_PTR_FORMAT, incaps, outcaps);
 
   if (!self->renderer) return FALSE;
+
+  /* The caps were negotiated for the properties as they are now. A change
+   * that lands between negotiation and here may not fit these caps: never
+   * pass a buffer through to caps of another size (the pending reconfigure
+   * renegotiates on the next buffer). */
+  GST_OBJECT_LOCK (self);
+  gboolean passthrough = gst_vf_metal_transform_apply_locked (self) &&
+      GST_VIDEO_INFO_WIDTH (in_info) == GST_VIDEO_INFO_WIDTH (out_info) &&
+      GST_VIDEO_INFO_HEIGHT (in_info) == GST_VIDEO_INFO_HEIGHT (out_info);
+  GST_OBJECT_UNLOCK (self);
+
+  gst_base_transform_set_passthrough (GST_BASE_TRANSFORM (self), passthrough);
+  GST_DEBUG_OBJECT (self, "passthrough = %s", passthrough ? "TRUE" : "FALSE");
 
   @autoreleasepool {
     MetalTransformRenderer *renderer =
@@ -168,14 +373,14 @@ gst_vf_metal_transform_transform_frame (GstVideoFilter * filter,
   MetalTransformRenderer *renderer =
       (__bridge MetalTransformRenderer *)self->renderer;
 
-  /* Snapshot properties under lock */
+  /* The properties the output caps were negotiated for */
   TransformParams params;
   GST_OBJECT_LOCK (self);
-  params.method = (VfMetalTransformMethod)self->method;
-  params.cropTop = self->crop_top;
-  params.cropBottom = self->crop_bottom;
-  params.cropLeft = self->crop_left;
-  params.cropRight = self->crop_right;
+  params.method = (VfMetalTransformMethod)self->applied_method;
+  params.cropTop = self->applied_crop_top;
+  params.cropBottom = self->applied_crop_bottom;
+  params.cropLeft = self->applied_crop_left;
+  params.cropRight = self->applied_crop_right;
   GST_OBJECT_UNLOCK (self);
 
   @autoreleasepool {
@@ -195,32 +400,40 @@ gst_vf_metal_transform_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec)
 {
   GstVfMetalTransform *self = GST_VF_METAL_TRANSFORM (object);
+  gint *field;
 
-  GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_METHOD:
-      self->method = g_value_get_enum (value);
+      field = &self->method;
       break;
     case PROP_CROP_TOP:
-      self->crop_top = g_value_get_int (value);
+      field = &self->crop_top;
       break;
     case PROP_CROP_BOTTOM:
-      self->crop_bottom = g_value_get_int (value);
+      field = &self->crop_bottom;
       break;
     case PROP_CROP_LEFT:
-      self->crop_left = g_value_get_int (value);
+      field = &self->crop_left;
       break;
     case PROP_CROP_RIGHT:
-      self->crop_right = g_value_get_int (value);
+      field = &self->crop_right;
       break;
     default:
-      GST_OBJECT_UNLOCK (self);
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       return;
   }
+
+  gint v = prop_id == PROP_METHOD ? g_value_get_enum (value) :
+      g_value_get_int (value);
+  GST_OBJECT_LOCK (self);
+  gboolean changed = *field != v;
+  *field = v;
   GST_OBJECT_UNLOCK (self);
 
-  gst_vf_metal_transform_update_passthrough (self);
+  /* The method and the crop decide the output size and the passthrough:
+   * renegotiate; set_info or before_transform applies them. */
+  if (changed)
+    gst_base_transform_reconfigure_src (GST_BASE_TRANSFORM (self));
 }
 
 static void
@@ -309,6 +522,7 @@ gst_vf_metal_transform_class_init (GstVfMetalTransformClass * klass)
 {
   GObjectClass *gobject_class = (GObjectClass *) klass;
   GstElementClass *gstelement_class = (GstElementClass *) klass;
+  GstBaseTransformClass *basetransform_class = (GstBaseTransformClass *) klass;
   GstVideoFilterClass *gstvideofilter_class = (GstVideoFilterClass *) klass;
 
   gobject_class->set_property = gst_vf_metal_transform_set_property;
@@ -317,6 +531,11 @@ gst_vf_metal_transform_class_init (GstVfMetalTransformClass * klass)
 
   gstelement_class->change_state =
       GST_DEBUG_FUNCPTR (gst_vf_metal_transform_change_state);
+
+  basetransform_class->transform_caps =
+      GST_DEBUG_FUNCPTR (gst_vf_metal_transform_transform_caps);
+  basetransform_class->before_transform =
+      GST_DEBUG_FUNCPTR (gst_vf_metal_transform_before_transform);
 
   gstvideofilter_class->set_info =
       GST_DEBUG_FUNCPTR (gst_vf_metal_transform_set_info);
