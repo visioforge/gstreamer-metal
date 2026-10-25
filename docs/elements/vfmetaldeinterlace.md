@@ -66,7 +66,7 @@ gst-launch-1.0 videotestsrc ! video/x-raw,format=BGRA,width=640,height=480 ! \
 
 ## Notes
 
-- When `field-layout` is `auto`, the field order comes from the caps `field-order`, else from `GST_VIDEO_BUFFER_FLAG_TFF` on each buffer
+- When `field-layout` is `auto`, the field order is top-field-first when the caps say `field-order=top-field-first` or the buffer carries `GST_VIDEO_BUFFER_FLAG_TFF` (as `gst_video_frame_map` reports it), else bottom-field-first
 - The output is progressive: the src caps carry `interlace-mode=progressive` and the output buffers no interlacing flags
 - In an `interlace-mode=mixed` stream, a frame whose buffer is not flagged `GST_VIDEO_BUFFER_FLAG_INTERLACED` is copied unchanged
 - The `weave` and `greedyh` methods use frame history (previous frame data) for better quality

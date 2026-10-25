@@ -302,7 +302,8 @@ gst_vf_metal_transform_before_transform (GstBaseTransform * trans,
       gst_vf_metal_transform_method_swaps_axes (self->method) !=
       gst_vf_metal_transform_method_swaps_axes (self->applied_method) &&
       GST_VIDEO_INFO_PAR_N (&filter->in_info) !=
-      GST_VIDEO_INFO_PAR_D (&filter->in_info);
+      GST_VIDEO_INFO_PAR_D (&filter->in_info) &&
+      GST_VIDEO_INFO_PAR_N (&filter->in_info) != 0;
   if (par_changes || w != GST_VIDEO_INFO_WIDTH (&filter->out_info) ||
       h != GST_VIDEO_INFO_HEIGHT (&filter->out_info)) {
     GST_OBJECT_UNLOCK (self);
