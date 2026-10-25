@@ -108,6 +108,18 @@ run_test "Bottom-field-first" \
         vfmetaldeinterlace method=bob field-layout=bottom-field-first ! \
         fakesink
 
+# --- Output caps ---
+# The output is progressive: a capsfilter after the element that asks for it
+# fails negotiation otherwise.
+echo "--- Output caps ---"
+for method in bob weave linear greedyh; do
+    run_test "$method output is progressive" \
+        $GST_LAUNCH videotestsrc num-buffers=5 ! \
+            "video/x-raw,format=BGRA,width=640,height=480,interlace-mode=interleaved,field-order=top-field-first" ! \
+            vfmetaldeinterlace method=$method ! \
+            "video/x-raw,interlace-mode=progressive" ! fakesink
+done
+
 # --- HD content ---
 echo "--- HD content ---"
 run_test "Bob 1080p BGRA" \
