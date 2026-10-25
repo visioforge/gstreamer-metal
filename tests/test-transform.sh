@@ -151,6 +151,11 @@ run_test "Rotation inverts the pixel aspect ratio" \
         vfmetaltransform method=counterclockwise ! \
         "video/x-raw,width=480,height=640,pixel-aspect-ratio=1/2" ! fakesink
 
+run_test "A list of sizes from upstream negotiates" \
+    $GST_LAUNCH videotestsrc num-buffers=3 ! \
+        "video/x-raw,format=BGRA,width={ 640, 1280 },height={ 480, 720 }" ! \
+        vfmetaltransform method=clockwise crop-left=40 ! fakesink
+
 # --- HD content ---
 echo "--- HD content ---"
 run_test "1080p clockwise" \
