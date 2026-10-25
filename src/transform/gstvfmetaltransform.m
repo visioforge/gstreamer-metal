@@ -227,7 +227,7 @@ gst_vf_metal_transform_transform_caps (GstBaseTransform * trans,
 
     gint par_n, par_d;
     if (swap && gst_structure_get_fraction (s, "pixel-aspect-ratio",
-            &par_n, &par_d) && par_n != par_d) {
+            &par_n, &par_d) && par_n != par_d && par_n != 0) {
       gst_structure_set (s, "pixel-aspect-ratio", GST_TYPE_FRACTION,
           par_d, par_n, NULL);
     }

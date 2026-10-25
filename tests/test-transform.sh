@@ -151,6 +151,13 @@ run_test "Rotation inverts the pixel aspect ratio" \
         vfmetaltransform method=counterclockwise ! \
         "video/x-raw,width=480,height=640,pixel-aspect-ratio=1/2" ! fakesink
 
+run_test "An unknown pixel aspect ratio (0/1) rotates without a critical" \
+    sh -c "out=\$($GST_LAUNCH videotestsrc num-buffers=3 ! \
+        video/x-raw,format=BGRA,width=640,height=480,pixel-aspect-ratio=0/1 ! \
+        vfmetaltransform method=clockwise ! \
+        video/x-raw,width=480,height=640,pixel-aspect-ratio=0/1 ! fakesink 2>&1) && \
+        ! echo \"\$out\" | grep -q CRITICAL"
+
 run_test "A list of sizes from upstream negotiates" \
     $GST_LAUNCH videotestsrc num-buffers=3 ! \
         "video/x-raw,format=BGRA,width={ 640, 1280 },height={ 480, 720 }" ! \
