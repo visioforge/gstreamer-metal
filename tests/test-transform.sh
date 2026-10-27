@@ -178,6 +178,19 @@ run_test "1080p rotate-180 NV12" \
         vfmetaltransform method=rotate-180 ! \
         fakesink
 
+# --- A batch of writes takes effect together ---
+# gst-launch cannot put a buffer between two property writes; this harness
+# does, on one thread. pkg-config has to find gstreamer-check-1.0.
+echo "--- Batched property writes ---"
+if [ -d "/Library/Frameworks/GStreamer.framework" ]; then
+    export PKG_CONFIG_PATH="/Library/Frameworks/GStreamer.framework/Libraries/pkgconfig:${PKG_CONFIG_PATH:-}"
+fi
+BATCH_BIN="${BUILD_DIR}/test-transform-batch"
+run_test "A buffer between two writes of a batch keeps the size" \
+    sh -c "cc '${SCRIPT_DIR}/test-transform-batch.c' -o '${BATCH_BIN}' \
+        \$(pkg-config --cflags --libs gstreamer-check-1.0 gstreamer-1.0) && \
+        GST_REGISTRY_FORK=no '${BATCH_BIN}'"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASSED/$TOTAL passed, $FAILED failed ==="
