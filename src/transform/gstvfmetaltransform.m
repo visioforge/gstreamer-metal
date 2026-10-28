@@ -404,36 +404,64 @@ gst_vf_metal_transform_set_property (GObject * object, guint prop_id,
 
   switch (prop_id) {
     case PROP_METHOD:
-      field = &self->method;
+      field = &self->pending_method;
       break;
     case PROP_CROP_TOP:
-      field = &self->crop_top;
+      field = &self->pending_crop_top;
       break;
     case PROP_CROP_BOTTOM:
-      field = &self->crop_bottom;
+      field = &self->pending_crop_bottom;
       break;
     case PROP_CROP_LEFT:
-      field = &self->crop_left;
+      field = &self->pending_crop_left;
       break;
     case PROP_CROP_RIGHT:
-      field = &self->crop_right;
+      field = &self->pending_crop_right;
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       return;
   }
 
+  /* dispatch_properties_changed commits it, with the rest of the batch */
   gint v = prop_id == PROP_METHOD ? g_value_get_enum (value) :
       g_value_get_int (value);
   GST_OBJECT_LOCK (self);
-  gboolean changed = *field != v;
   *field = v;
+  GST_OBJECT_UNLOCK (self);
+}
+
+/* GObject calls this once per batch of writes, after the last one: right
+ * after a single g_object_set_property (), at the end of a g_object_set ()
+ * with several properties, or at the g_object_thaw_notify () that ends a
+ * freeze. Committing here means the streaming thread never sees a method and
+ * crops that were never set together. */
+static void
+gst_vf_metal_transform_dispatch_properties_changed (GObject * object,
+    guint n_pspecs, GParamSpec ** pspecs)
+{
+  GstVfMetalTransform *self = GST_VF_METAL_TRANSFORM (object);
+
+  GST_OBJECT_LOCK (self);
+  gboolean changed = self->method != self->pending_method ||
+      self->crop_top != self->pending_crop_top ||
+      self->crop_bottom != self->pending_crop_bottom ||
+      self->crop_left != self->pending_crop_left ||
+      self->crop_right != self->pending_crop_right;
+  self->method = self->pending_method;
+  self->crop_top = self->pending_crop_top;
+  self->crop_bottom = self->pending_crop_bottom;
+  self->crop_left = self->pending_crop_left;
+  self->crop_right = self->pending_crop_right;
   GST_OBJECT_UNLOCK (self);
 
   /* The method and the crop decide the output size and the passthrough:
    * renegotiate; set_info or before_transform applies them. */
   if (changed)
     gst_base_transform_reconfigure_src (GST_BASE_TRANSFORM (self));
+
+  G_OBJECT_CLASS (parent_class)->dispatch_properties_changed (object,
+      n_pspecs, pspecs);
 }
 
 static void
@@ -445,19 +473,19 @@ gst_vf_metal_transform_get_property (GObject * object, guint prop_id,
   GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_METHOD:
-      g_value_set_enum (value, self->method);
+      g_value_set_enum (value, self->pending_method);
       break;
     case PROP_CROP_TOP:
-      g_value_set_int (value, self->crop_top);
+      g_value_set_int (value, self->pending_crop_top);
       break;
     case PROP_CROP_BOTTOM:
-      g_value_set_int (value, self->crop_bottom);
+      g_value_set_int (value, self->pending_crop_bottom);
       break;
     case PROP_CROP_LEFT:
-      g_value_set_int (value, self->crop_left);
+      g_value_set_int (value, self->pending_crop_left);
       break;
     case PROP_CROP_RIGHT:
-      g_value_set_int (value, self->crop_right);
+      g_value_set_int (value, self->pending_crop_right);
       break;
     default:
       GST_OBJECT_UNLOCK (self);
@@ -528,6 +556,8 @@ gst_vf_metal_transform_class_init (GstVfMetalTransformClass * klass)
   gobject_class->set_property = gst_vf_metal_transform_set_property;
   gobject_class->get_property = gst_vf_metal_transform_get_property;
   gobject_class->finalize = gst_vf_metal_transform_finalize;
+  gobject_class->dispatch_properties_changed =
+      gst_vf_metal_transform_dispatch_properties_changed;
 
   gstelement_class->change_state =
       GST_DEBUG_FUNCPTR (gst_vf_metal_transform_change_state);
@@ -598,6 +628,11 @@ gst_vf_metal_transform_init (GstVfMetalTransform * self)
   self->crop_bottom = DEFAULT_CROP;
   self->crop_left = DEFAULT_CROP;
   self->crop_right = DEFAULT_CROP;
+  self->pending_method = DEFAULT_METHOD;
+  self->pending_crop_top = DEFAULT_CROP;
+  self->pending_crop_bottom = DEFAULT_CROP;
+  self->pending_crop_left = DEFAULT_CROP;
+  self->pending_crop_right = DEFAULT_CROP;
 
   @autoreleasepool {
     MetalTransformRenderer *renderer =

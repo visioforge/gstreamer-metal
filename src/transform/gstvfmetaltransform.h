@@ -42,7 +42,16 @@ struct _GstVfMetalTransform
 {
   GstVideoFilter videofilter;
 
-  /* Properties */
+  /* The properties as last written; committed to the fields below in one
+   * step when the write's notifications are dispatched, so a batch (one
+   * g_object_set () or a freeze/thaw) is never seen half-applied. */
+  gint pending_method;
+  gint pending_crop_top;
+  gint pending_crop_bottom;
+  gint pending_crop_left;
+  gint pending_crop_right;
+
+  /* The committed properties, what negotiation reads */
   gint method;          /* VfMetalTransformMethod enum */
   gint crop_top;
   gint crop_bottom;
