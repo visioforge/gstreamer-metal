@@ -364,6 +364,10 @@ fragment float4 checkerFragment(
                  background:(MetalBackgroundType)background
                    outFrame:(GstVideoFrame *)outFrame
 {
+    /* Nil after a failed rebuild. A live aggregator still aggregates on
+     * timeout when negotiation failed, so this is reachable. */
+    if (!_outputTexture) return NO;
+
     @autoreleasepool {
         [_textureCache resetFrameIndex];
 
