@@ -236,16 +236,26 @@ typedef struct {
     GstVideoFormat inFmt = GST_VIDEO_INFO_FORMAT (inInfo);
     GstVideoFormat outFmt = GST_VIDEO_INFO_FORMAT (outInfo);
 
-    /* Check if reconfigure is needed */
+    /* Same geometry and formats: no resource needs rebuilding. Method and
+     * borders are read per frame, so storing them is enough. */
     if (_renderTarget && _inWidth == inW && _inHeight == inH &&
         _outWidth == outW && _outHeight == outH &&
-        _inputFormat == inFmt && _outputFormat == outFmt &&
-        _method == method && _addBorders == addBorders &&
-        _borderColor == borderColor) {
+        _inputFormat == inFmt && _outputFormat == outFmt) {
+        _method = method;
+        _borderColor = borderColor;
+        if (_addBorders != addBorders) {
+            _addBorders = addBorders;
+            [self _computeViewportWithAddBorders:addBorders];
+        }
         return YES;
     }
 
     id<MTLDevice> device = [VfMetalDevice sharedDevice].device;
+
+    /* Set again only once every resource is built, so a rebuild that fails
+     * halfway is retried by the next call instead of matching the check
+     * above with stale resources. */
+    _renderTarget = nil;
 
     _inWidth = inW;
     _inHeight = inH;
@@ -285,8 +295,8 @@ typedef struct {
                    MTLTextureUsageShaderWrite;
     rtDesc.storageMode = MTLStorageModeShared;
 
-    _renderTarget = [device newTextureWithDescriptor:rtDesc];
-    if (!_renderTarget) return NO;
+    id<MTLTexture> renderTarget = [device newTextureWithDescriptor:rtDesc];
+    if (!renderTarget) return NO;
 
     /* Clean up old packed output resources */
     _outputPacked = nil;
@@ -326,6 +336,7 @@ typedef struct {
         }
     }
 
+    _renderTarget = renderTarget;
     return YES;
 }
 

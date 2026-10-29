@@ -51,7 +51,7 @@ struct _GstVfMetalConvertScale
   gboolean pending_add_borders;
   guint32 pending_border_color;
 
-  /* The committed properties, what the renderer is configured with */
+  /* The committed properties, what the next frame renders with */
   gint method;              /* 0=bilinear, 1=nearest */
   gboolean add_borders;     /* letterbox/pillarbox */
   guint32 border_color;     /* ARGB border color */
