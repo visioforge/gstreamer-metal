@@ -510,11 +510,6 @@ _negotiated_caps (GstAggregator * agg, GstCaps * caps)
     return FALSE;
   }
 
-  /* Parent first: it updates vagg->info only on success, so a refusal leaves
-   * the renderer at the size the output frames are still mapped with. */
-  if (!GST_AGGREGATOR_CLASS (parent_class)->negotiated_src_caps (agg, caps))
-    return FALSE;
-
   MetalCompositorRenderer *renderer =
       (__bridge MetalCompositorRenderer *)self->renderer;
   if (![renderer configureWithWidth:GST_VIDEO_INFO_WIDTH (&v_info)
@@ -524,7 +519,7 @@ _negotiated_caps (GstAggregator * agg, GstCaps * caps)
     return FALSE;
   }
 
-  return TRUE;
+  return GST_AGGREGATOR_CLASS (parent_class)->negotiated_src_caps (agg, caps);
 }
 
 /* --- aggregate_frames --- */

@@ -345,24 +345,22 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
     _videoFormat = format;
     _inputFormatIndex = vf_metal_input_format_index (format);
 
-    /* Create pipelines if not yet created (they don't depend on resolution).
-     * Built in order and the loop stops at the first failure, so checking the
-     * last one retries a set that failed halfway. */
-    if (!_pipelines[VF_METAL_INPUT_COUNT - 1]) {
-        NSString *fragNames[VF_METAL_INPUT_COUNT] = {
-            @"videosinkFragment",
-            @"videosinkFragmentNV12",
-            @"videosinkFragmentI420"
-        };
+    /* Create the pipelines not yet created (they don't depend on resolution),
+     * so a set that failed halfway is completed by the next call */
+    NSString *fragNames[VF_METAL_INPUT_COUNT] = {
+        @"videosinkFragment",
+        @"videosinkFragmentNV12",
+        @"videosinkFragmentI420"
+    };
 
-        for (int fmt = 0; fmt < VF_METAL_INPUT_COUNT; fmt++) {
-            _pipelines[fmt] =
-                [self createPipelineWithFragmentFunction:fragNames[fmt]];
-            if (!_pipelines[fmt]) {
-                GST_ERROR ("MetalVideoSinkRenderer: Failed to create pipeline for format %d",
-                           fmt);
-                return NO;
-            }
+    for (int fmt = 0; fmt < VF_METAL_INPUT_COUNT; fmt++) {
+        if (_pipelines[fmt]) continue;
+        _pipelines[fmt] =
+            [self createPipelineWithFragmentFunction:fragNames[fmt]];
+        if (!_pipelines[fmt]) {
+            GST_ERROR ("MetalVideoSinkRenderer: Failed to create pipeline for format %d",
+                       fmt);
+            return NO;
         }
     }
 

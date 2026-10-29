@@ -366,7 +366,11 @@ fragment float4 checkerFragment(
 {
     /* Nil after a failed rebuild. A live aggregator still aggregates on
      * timeout when negotiation failed, so this is reachable. */
-    if (!_outputTexture) return NO;
+    if (!_outputTexture) {
+        GST_ERROR ("MetalCompositorRenderer: Output texture not configured, "
+                   "the last negotiation failed");
+        return NO;
+    }
 
     @autoreleasepool {
         [_textureCache resetFrameIndex];
