@@ -73,6 +73,11 @@ main (int argc, char **argv)
   check_pixel ("add-borders set while streaming",
       push_and_get_top_pixel (h), 0xFFFF0000);
 
+  /* Same geometry, borders stay on: only the colour is stored */
+  g_object_set (h->element, "border-color", 0xFF0000FF, NULL);
+  check_pixel ("border-color changed while streaming",
+      push_and_get_top_pixel (h), 0xFF0000FF);
+
   g_object_set (h->element, "add-borders", FALSE, NULL);
   check_pixel ("add-borders cleared while streaming",
       push_and_get_top_pixel (h), 0xFFFFFFFF);

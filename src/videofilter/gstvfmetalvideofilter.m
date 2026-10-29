@@ -300,10 +300,12 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
       (!self->lut_loaded && self->pending_lut_file &&
       *self->pending_lut_file != '\0');
   gchar *lut_file = NULL;
+  guint lut_load = 0;
   if (reload) {
     g_free (self->lut_file);
     self->lut_file = g_strdup (self->pending_lut_file);
     lut_file = g_strdup (self->lut_file);
+    lut_load = ++self->lut_load;
   }
   GST_OBJECT_UNLOCK (self);
 
@@ -314,24 +316,23 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
    * texture on the streaming thread (transform_frame), with the parameters
    * committed below. Frames drawn while the file loads keep the old LUT and
    * the old look. A failed load keeps the old LUT. */
+  gboolean clear = !lut_file || lut_file[0] == '\0';
   id<MTLTexture> lut = nil;
   int lut_size = 0;
-  gboolean lut_ok = TRUE;
-  if (reload && renderer && lut_file && lut_file[0] != '\0') {
+  if (reload && renderer && !clear) {
     @autoreleasepool {
       lut = [MetalVideoFilterRenderer lutTextureFromFile:lut_file
                                                     size:&lut_size];
     }
-    lut_ok = lut != nil;
-    if (!lut_ok)
+    if (!lut)
       GST_WARNING_OBJECT (self, "Failed to load LUT: %s", lut_file);
   }
 
   GST_OBJECT_LOCK (self);
-  /* A dispatch that wrote another path while this file loaded wins */
-  if (reload && g_strcmp0 (self->lut_file, lut_file) == 0) {
+  /* A reload started while this file loaded wins, even for the same path */
+  if (reload && lut_load == self->lut_load) {
     self->lut_loaded = lut != nil;
-    if (renderer && lut_ok)
+    if (renderer && (lut || clear))
       [renderer stageLUT:lut size:lut_size];
   }
   g_free (lut_file);
