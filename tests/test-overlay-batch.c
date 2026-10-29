@@ -4,12 +4,16 @@
  * with the old rectangle; it never shows the new position with the old size.
  *
  * GstHarness pushes on the calling thread, so the buffer "in the gap" is
- * deterministic. argv[1] is a solid red PNG. Exit code 0 means every check
- * passed. */
+ * deterministic. argv[1] is a solid red PNG, argv[2] a path that does not
+ * exist yet. Exit code 0 means every check passed.
+ *
+ * Also: the image survives a restart (READY and back), and a location whose
+ * load failed is loaded again when it is written again. */
 
 #include <stdio.h>
 #include <gst/gst.h>
 #include <gst/check/gstharness.h>
+#include <glib/gstdio.h>
 
 #define W 64
 #define H 64
@@ -52,8 +56,8 @@ int
 main (int argc, char **argv)
 {
   gst_init (&argc, &argv);
-  if (argc < 2) {
-    printf ("usage: %s <red.png>\n", argv[0]);
+  if (argc < 3) {
+    printf ("usage: %s <red.png> <missing.png>\n", argv[0]);
     return 2;
   }
 
@@ -88,6 +92,35 @@ main (int argc, char **argv)
   out = push_black (h);
   check ("single write", out, 8, 40, TRUE);
   gst_clear_buffer (&out);
+
+  /* A restart keeps the image: the same location is not loaded again. */
+  gst_element_set_state (h->element, GST_STATE_READY);
+  gst_element_set_state (h->element, GST_STATE_PLAYING);
+  gst_harness_set_src_caps_str (h,
+      "video/x-raw,format=BGRA,width=64,height=64,framerate=30/1");
+  g_object_set (h->element, "location", argv[1], NULL);
+  out = push_black (h);
+  check ("after a restart", out, 8, 40, TRUE);
+  gst_clear_buffer (&out);
+
+  /* A location that failed to load is tried again when written again. */
+  g_object_set (h->element, "location", argv[2], NULL);
+  out = push_black (h);
+  check ("missing file", out, 8, 40, FALSE);
+  gst_clear_buffer (&out);
+  gchar *png = NULL;
+  gsize len = 0;
+  if (!g_file_get_contents (argv[1], &png, &len, NULL) ||
+      !g_file_set_contents (argv[2], png, len, NULL)) {
+    printf ("  FAIL  could not write %s\n", argv[2]);
+    failures++;
+  }
+  g_free (png);
+  g_object_set (h->element, "location", argv[2], NULL);
+  out = push_black (h);
+  check ("the same location once the file exists", out, 8, 40, TRUE);
+  gst_clear_buffer (&out);
+  g_unlink (argv[2]);
 
   gst_harness_teardown (h);
 

@@ -290,6 +290,38 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
 {
   GstVfMetalVideoFilter *self = GST_VF_METAL_VIDEO_FILTER (object);
 
+  /* A new path, or the same one after a load that failed: (re)load it. The
+   * same path loaded already is not read again. */
+  GST_OBJECT_LOCK (self);
+  gboolean reload =
+      g_strcmp0 (self->lut_file, self->pending_lut_file) != 0 ||
+      (!self->lut_loaded && self->pending_lut_file &&
+      *self->pending_lut_file != '\0');
+  if (reload) {
+    g_free (self->lut_file);
+    self->lut_file = g_strdup (self->pending_lut_file);
+  }
+  GST_OBJECT_UNLOCK (self);
+
+  /* The LUT first, outside the lock (Metal GPU work), then the parameters:
+   * frames drawn while the file loads keep the old LUT and the old look. */
+  if (reload && self->renderer) {
+    @autoreleasepool {
+      MetalVideoFilterRenderer *renderer =
+          (__bridge MetalVideoFilterRenderer *)self->renderer;
+      if (self->lut_file && self->lut_file[0] != '\0') {
+        self->lut_loaded = [renderer loadLUTFromFile:self->lut_file];
+        if (!self->lut_loaded) {
+          GST_WARNING_OBJECT (self, "Failed to load LUT: %s",
+                             self->lut_file);
+        }
+      } else {
+        [renderer clearLUT];
+        self->lut_loaded = FALSE;
+      }
+    }
+  }
+
   GST_OBJECT_LOCK (self);
   self->brightness = self->pending_brightness;
   self->contrast = self->pending_contrast;
@@ -305,30 +337,7 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
   self->chroma_key_color = self->pending_chroma_key_color;
   self->chroma_key_tolerance = self->pending_chroma_key_tolerance;
   self->chroma_key_smoothness = self->pending_chroma_key_smoothness;
-  gboolean lut_changed =
-      g_strcmp0 (self->lut_file, self->pending_lut_file) != 0;
-  if (lut_changed) {
-    g_free (self->lut_file);
-    self->lut_file = g_strdup (self->pending_lut_file);
-  }
   GST_OBJECT_UNLOCK (self);
-
-  /* LUT loading outside lock (involves Metal GPU operations); only for a new
-   * path, so rewriting the same lut-file does not reload the file. */
-  if (lut_changed && self->renderer) {
-    @autoreleasepool {
-      MetalVideoFilterRenderer *renderer =
-          (__bridge MetalVideoFilterRenderer *)self->renderer;
-      if (self->lut_file && self->lut_file[0] != '\0') {
-        if (![renderer loadLUTFromFile:self->lut_file]) {
-          GST_WARNING_OBJECT (self, "Failed to load LUT: %s",
-                             self->lut_file);
-        }
-      } else {
-        [renderer clearLUT];
-      }
-    }
-  }
 
   gst_vf_metal_video_filter_update_passthrough (self);
 
@@ -626,6 +635,7 @@ gst_vf_metal_video_filter_init (GstVfMetalVideoFilter * self)
   self->pending_chroma_key_tolerance = self->chroma_key_tolerance;
   self->pending_chroma_key_smoothness = self->chroma_key_smoothness;
   self->pending_lut_file = NULL;
+  self->lut_loaded = FALSE;
   self->frame_count = 0;
 
   @autoreleasepool {

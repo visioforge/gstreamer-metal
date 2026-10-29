@@ -740,8 +740,8 @@ parse_png_lut (const char *path, id<MTLDevice> device, int *outSize)
     _blurTemp = nil;
     _blurResult = nil;
     [_yuvOutput cleanup];
-    _lutTexture = nil;
-    _lutSize = 0;
+    /* _lutTexture stays: it does not depend on the caps, and the element does
+     * not load the same lut-file again after a restart. */
     for (int f = 0; f < VF_METAL_INPUT_COUNT; f++)
         _pipelines[f] = nil;
 }

@@ -264,13 +264,25 @@ gst_vf_metal_overlay_dispatch_properties_changed (GObject * object,
 {
   GstVfMetalOverlay *self = GST_VF_METAL_OVERLAY (object);
 
+  /* A new path, or the same one after a load that failed: (re)load it. The
+   * same path loaded already is not read again. */
   GST_OBJECT_LOCK (self);
-  gboolean location_changed =
-      g_strcmp0 (self->location, self->pending_location) != 0;
-  if (location_changed) {
+  gboolean reload =
+      g_strcmp0 (self->location, self->pending_location) != 0 ||
+      (!self->image_loaded && self->pending_location &&
+      *self->pending_location != '\0');
+  if (reload) {
     g_free (self->location);
     self->location = g_strdup (self->pending_location);
   }
+  GST_OBJECT_UNLOCK (self);
+
+  /* The image first, outside the lock (Metal GPU work), then the geometry:
+   * frames drawn while the file loads keep the old image in the old place. */
+  if (reload)
+    gst_vf_metal_overlay_load_image (self);
+
+  GST_OBJECT_LOCK (self);
   self->x = self->pending_x;
   self->y = self->pending_y;
   self->width = self->pending_width;
@@ -279,11 +291,6 @@ gst_vf_metal_overlay_dispatch_properties_changed (GObject * object,
   self->relative_x = self->pending_relative_x;
   self->relative_y = self->pending_relative_y;
   GST_OBJECT_UNLOCK (self);
-
-  /* Image loading outside lock (involves Metal GPU operations); only for a
-   * new path, so rewriting the same location does not reload the file. */
-  if (location_changed)
-    gst_vf_metal_overlay_load_image (self);
 
   G_OBJECT_CLASS (parent_class)->dispatch_properties_changed (object,
       n_pspecs, pspecs);

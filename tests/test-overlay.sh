@@ -137,7 +137,7 @@ if [ -f "$TEST_IMG" ]; then
     run_test "A buffer between two writes of a batch keeps the rectangle" \
         sh -c "cc '${SCRIPT_DIR}/test-overlay-batch.c' -o '${BATCH_BIN}' \
             \$(pkg-config --cflags --libs gstreamer-check-1.0 gstreamer-1.0) && \
-            GST_REGISTRY_FORK=no '${BATCH_BIN}' '${TEST_IMG}'"
+            GST_REGISTRY_FORK=no '${BATCH_BIN}' '${TEST_IMG}' '${TEST_IMG}.missing.png'"
 else
     echo "--- Skipping overlay tests (could not generate test image) ---"
 fi

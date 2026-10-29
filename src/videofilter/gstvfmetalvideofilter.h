@@ -88,6 +88,7 @@ struct _GstVfMetalVideoFilter
 
   /* LUT */
   gchar *lut_file;          /* path to .cube or .png LUT file */
+  gboolean lut_loaded;      /* lut_file was read into the renderer */
 
   /* Frame counter for noise randomization */
   guint64 frame_count;
