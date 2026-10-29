@@ -5,7 +5,9 @@
  *
  * A white frame goes through an inverting 2x2x2 .cube LUT and comes out
  * black. A path that fails to load keeps the LUT already in use; an empty
- * path drops it. Exit code 0 means every check passed.
+ * path drops it. saturation=2 keeps the element out of passthrough (it
+ * leaves white white), so every frame goes through the renderer. Exit code
+ * 0 means every check passed.
  *
  * GstHarness pushes on the calling thread, so this proves the LUT reaches
  * the renderer, not that the old cross-thread race is gone: that race is not
@@ -15,6 +17,7 @@
 #include <gst/gst.h>
 #include <gst/check/gstharness.h>
 #include <glib/gstdio.h>
+#include <unistd.h>
 
 #define W 64
 #define H 64
@@ -59,9 +62,12 @@ main (int argc, char **argv)
 {
   gst_init (&argc, &argv);
 
-  gchar *lut = g_build_filename (g_get_tmp_dir (), "vfmetal-invert.cube", NULL);
-  gchar *missing =
-      g_build_filename (g_get_tmp_dir (), "vfmetal-missing.cube", NULL);
+  gchar *name = g_strdup_printf ("vfmetal-invert-%d.cube", (int) getpid ());
+  gchar *lut = g_build_filename (g_get_tmp_dir (), name, NULL);
+  g_free (name);
+  name = g_strdup_printf ("vfmetal-missing-%d.cube", (int) getpid ());
+  gchar *missing = g_build_filename (g_get_tmp_dir (), name, NULL);
+  g_free (name);
   FILE *f = fopen (lut, "w");
   if (!f) {
     printf ("  FAIL  cannot write %s\n", lut);
@@ -78,6 +84,7 @@ main (int argc, char **argv)
   GstHarness *h = gst_harness_new ("vfmetalvideofilter");
   gst_harness_set_src_caps_str (h,
       "video/x-raw,format=BGRA,width=64,height=64,framerate=30/1");
+  g_object_set (h->element, "saturation", 2.0, NULL);
 
   check_rgb ("no LUT", push_and_get_rgb (h), 0xFFFFFF);
 

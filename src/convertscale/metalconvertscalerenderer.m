@@ -242,9 +242,11 @@ typedef struct {
         _outWidth == outW && _outHeight == outH &&
         _inputFormat == inFmt && _outputFormat == outFmt) {
         _method = method;
-        _addBorders = addBorders;
         _borderColor = borderColor;
-        [self _computeViewportWithAddBorders:addBorders];
+        if (_addBorders != addBorders) {
+            _addBorders = addBorders;
+            [self _computeViewportWithAddBorders:addBorders];
+        }
         return YES;
     }
 

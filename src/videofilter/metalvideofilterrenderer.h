@@ -58,9 +58,9 @@ typedef struct {
               output:(GstVideoFrame *)outFrame
               params:(const VideoFilterParams *)params;
 
-/* Read a 3D LUT from a .cube or .png file; nil on failure. Touches no
- * renderer state, so any thread may call it. */
-- (id<MTLTexture>)newLUTFromFile:(const char *)path size:(int *)outSize;
+/* Read a 3D LUT from a .cube or .png file; nil on failure. A class
+ * method: it touches no renderer state, so any thread may call it. */
++ (id<MTLTexture>)lutTextureFromFile:(const char *)path size:(int *)outSize;
 
 /* Hand over the LUT (nil for none) that applyStagedLUT installs. The
  * caller serialises the two, the element under its object lock. */

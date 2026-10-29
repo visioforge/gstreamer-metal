@@ -703,7 +703,7 @@ parse_png_lut (const char *path, id<MTLDevice> device, int *outSize)
     }
 }
 
-- (id<MTLTexture>)newLUTFromFile:(const char *)path size:(int *)outSize
++ (id<MTLTexture>)lutTextureFromFile:(const char *)path size:(int *)outSize
 {
     id<MTLDevice> device = [VfMetalDevice sharedDevice].device;
     int lutSize = 0;

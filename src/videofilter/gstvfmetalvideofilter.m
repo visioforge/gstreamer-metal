@@ -299,7 +299,12 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
       g_strcmp0 (self->lut_file, self->pending_lut_file) != 0 ||
       (!self->lut_loaded && self->pending_lut_file &&
       *self->pending_lut_file != '\0');
-  gchar *lut_file = reload ? g_strdup (self->pending_lut_file) : NULL;
+  gchar *lut_file = NULL;
+  if (reload) {
+    g_free (self->lut_file);
+    self->lut_file = g_strdup (self->pending_lut_file);
+    lut_file = g_strdup (self->lut_file);
+  }
   GST_OBJECT_UNLOCK (self);
 
   MetalVideoFilterRenderer *renderer =
@@ -314,7 +319,8 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
   gboolean lut_ok = TRUE;
   if (reload && renderer && lut_file && lut_file[0] != '\0') {
     @autoreleasepool {
-      lut = [renderer newLUTFromFile:lut_file size:&lut_size];
+      lut = [MetalVideoFilterRenderer lutTextureFromFile:lut_file
+                                                    size:&lut_size];
     }
     lut_ok = lut != nil;
     if (!lut_ok)
@@ -322,13 +328,13 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
   }
 
   GST_OBJECT_LOCK (self);
-  if (reload) {
-    g_free (self->lut_file);
-    self->lut_file = lut_file;
+  /* A dispatch that wrote another path while this file loaded wins */
+  if (reload && g_strcmp0 (self->lut_file, lut_file) == 0) {
     self->lut_loaded = lut != nil;
     if (renderer && lut_ok)
       [renderer stageLUT:lut size:lut_size];
   }
+  g_free (lut_file);
   self->brightness = self->pending_brightness;
   self->contrast = self->pending_contrast;
   self->saturation = self->pending_saturation;
