@@ -342,6 +342,29 @@ gst_vf_metal_convertscale_transform (GstBaseTransform * trans,
     return GST_FLOW_ERROR;
   }
 
+  MetalConvertScaleRenderer *renderer =
+      (__bridge MetalConvertScaleRenderer *)self->renderer;
+
+  /* Settings committed since the last frame are applied here, on the
+   * streaming thread, so the renderer is never reconfigured mid-frame.
+   * Unchanged settings make this a no-op. */
+  GST_OBJECT_LOCK (self);
+  gint method = self->method;
+  gboolean add_borders = self->add_borders;
+  guint32 border_color = self->border_color;
+  GST_OBJECT_UNLOCK (self);
+
+  @autoreleasepool {
+    if (![renderer configureWithInputInfo:&self->in_info
+                               outputInfo:&self->out_info
+                                   method:(VfMetalScaleMethod)method
+                               addBorders:add_borders
+                              borderColor:border_color]) {
+      GST_ERROR_OBJECT (self, "Failed to configure Metal renderer");
+      return GST_FLOW_ERROR;
+    }
+  }
+
   if (!gst_video_frame_map (&inframe, &self->in_info, inbuf, GST_MAP_READ)) {
     GST_ERROR_OBJECT (self, "Failed to map input buffer");
     return GST_FLOW_ERROR;
@@ -353,9 +376,6 @@ gst_vf_metal_convertscale_transform (GstBaseTransform * trans,
     GST_ERROR_OBJECT (self, "Failed to map output buffer");
     return GST_FLOW_ERROR;
   }
-
-  MetalConvertScaleRenderer *renderer =
-      (__bridge MetalConvertScaleRenderer *)self->renderer;
 
   @autoreleasepool {
     if (![renderer processFrame:&inframe output:&outframe]) {
@@ -404,7 +424,8 @@ gst_vf_metal_convertscale_set_property (GObject * object, guint prop_id,
  * after a single g_object_set_property (), at the end of a g_object_set ()
  * with several properties, or at the g_object_thaw_notify () that ends a
  * freeze. Committing here means the renderer is never configured with
- * settings that were never set together. */
+ * settings that were never set together. The renderer itself is left to
+ * the next transform, which runs on the streaming thread. */
 static void
 gst_vf_metal_convertscale_dispatch_properties_changed (GObject * object,
     guint n_pspecs, GParamSpec ** pspecs)
@@ -412,26 +433,10 @@ gst_vf_metal_convertscale_dispatch_properties_changed (GObject * object,
   GstVfMetalConvertScale *self = GST_VF_METAL_CONVERTSCALE (object);
 
   GST_OBJECT_LOCK (self);
-  gboolean changed = self->method != self->pending_method ||
-      self->add_borders != self->pending_add_borders ||
-      self->border_color != self->pending_border_color;
   self->method = self->pending_method;
   self->add_borders = self->pending_add_borders;
   self->border_color = self->pending_border_color;
   GST_OBJECT_UNLOCK (self);
-
-  /* Reconfigure if caps already negotiated */
-  if (changed && self->negotiated && self->renderer) {
-    @autoreleasepool {
-      MetalConvertScaleRenderer *renderer =
-          (__bridge MetalConvertScaleRenderer *)self->renderer;
-      [renderer configureWithInputInfo:&self->in_info
-                            outputInfo:&self->out_info
-                                method:(VfMetalScaleMethod)self->method
-                            addBorders:self->add_borders
-                           borderColor:self->border_color];
-    }
-  }
 
   G_OBJECT_CLASS (parent_class)->dispatch_properties_changed (object,
       n_pspecs, pspecs);

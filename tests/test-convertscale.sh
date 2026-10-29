@@ -211,6 +211,19 @@ run_test "1:1 aspect ratio 480x480 -> 640x480" \
         "video/x-raw,format=BGRA,width=640,height=480" ! \
         fakesink
 
+# --- A property written while streaming takes effect ---
+# gst-launch cannot change a property between two buffers; this harness
+# does. pkg-config has to find gstreamer-check-1.0.
+echo "--- Runtime property changes ---"
+if [ -d "/Library/Frameworks/GStreamer.framework" ]; then
+    export PKG_CONFIG_PATH="/Library/Frameworks/GStreamer.framework/Libraries/pkgconfig:${PKG_CONFIG_PATH:-}"
+fi
+RUNTIME_BIN="${BUILD_DIR}/test-convertscale-runtime"
+run_test "add-borders written while streaming reaches the next buffer" \
+    sh -c "cc '${SCRIPT_DIR}/test-convertscale-runtime.c' -o '${RUNTIME_BIN}' \
+        \$(pkg-config --cflags --libs gstreamer-check-1.0 gstreamer-1.0) && \
+        GST_REGISTRY_FORK=no '${RUNTIME_BIN}'"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASSED/$TOTAL passed, $FAILED failed ==="
