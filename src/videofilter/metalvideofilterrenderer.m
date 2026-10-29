@@ -330,6 +330,11 @@ parse_png_lut (const char *path, id<MTLDevice> device, int *outSize)
     id<MTLTexture> _lutTexture;
     int _lutSize;
 
+    /* A LUT handed over by stageLUT, installed by applyStagedLUT */
+    id<MTLTexture> _stagedLUT;
+    int _stagedLUTSize;
+    BOOL _lutStaged;
+
     /* Current configuration */
     int _width;
     int _height;
@@ -698,13 +703,8 @@ parse_png_lut (const char *path, id<MTLDevice> device, int *outSize)
     }
 }
 
-- (BOOL)loadLUTFromFile:(const char *)path
+- (id<MTLTexture>)newLUTFromFile:(const char *)path size:(int *)outSize
 {
-    if (!path || *path == '\0') {
-        [self clearLUT];
-        return YES;
-    }
-
     id<MTLDevice> device = [VfMetalDevice sharedDevice].device;
     int lutSize = 0;
     id<MTLTexture> tex = nil;
@@ -717,20 +717,27 @@ parse_png_lut (const char *path, id<MTLDevice> device, int *outSize)
         tex = parse_png_lut (path, device, &lutSize);
     } else {
         GST_WARNING ("Unknown LUT file format: %s", path);
-        return NO;
+        return nil;
     }
 
-    if (!tex) return NO;
-
-    _lutTexture = tex;
-    _lutSize = lutSize;
-    return YES;
+    *outSize = lutSize;
+    return tex;
 }
 
-- (void)clearLUT
+- (void)stageLUT:(id<MTLTexture>)lut size:(int)size
 {
-    _lutTexture = nil;
-    _lutSize = 0;
+    _stagedLUT = lut;
+    _stagedLUTSize = lut ? size : 0;
+    _lutStaged = YES;
+}
+
+- (void)applyStagedLUT
+{
+    if (!_lutStaged) return;
+    _lutTexture = _stagedLUT;
+    _lutSize = _stagedLUTSize;
+    _stagedLUT = nil;
+    _lutStaged = NO;
 }
 
 - (void)cleanup

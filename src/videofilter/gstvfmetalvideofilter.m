@@ -201,6 +201,8 @@ gst_vf_metal_video_filter_transform_frame (GstVideoFilter * filter,
   params.chromaKeyB = (self->chroma_key_color & 0xFF) / 255.0f;
   params.chromaKeyTolerance = (float)self->chroma_key_tolerance;
   params.chromaKeySmoothness = (float)self->chroma_key_smoothness;
+  /* A LUT committed with these parameters takes effect with them */
+  [renderer applyStagedLUT];
   GST_OBJECT_UNLOCK (self);
   params.frameIndex = (uint32_t)(self->frame_count++);
 
@@ -297,32 +299,36 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
       g_strcmp0 (self->lut_file, self->pending_lut_file) != 0 ||
       (!self->lut_loaded && self->pending_lut_file &&
       *self->pending_lut_file != '\0');
-  if (reload) {
-    g_free (self->lut_file);
-    self->lut_file = g_strdup (self->pending_lut_file);
-  }
+  gchar *lut_file = reload ? g_strdup (self->pending_lut_file) : NULL;
   GST_OBJECT_UNLOCK (self);
 
-  /* The LUT first, outside the lock (Metal GPU work), then the parameters:
-   * frames drawn while the file loads keep the old LUT and the old look. */
-  if (reload && self->renderer) {
+  MetalVideoFilterRenderer *renderer =
+      (__bridge MetalVideoFilterRenderer *)self->renderer;
+
+  /* The file is read here, outside the lock; the renderer only gets the
+   * texture on the streaming thread (transform_frame), with the parameters
+   * committed below. Frames drawn while the file loads keep the old LUT and
+   * the old look. A failed load keeps the old LUT. */
+  id<MTLTexture> lut = nil;
+  int lut_size = 0;
+  gboolean lut_ok = TRUE;
+  if (reload && renderer && lut_file && lut_file[0] != '\0') {
     @autoreleasepool {
-      MetalVideoFilterRenderer *renderer =
-          (__bridge MetalVideoFilterRenderer *)self->renderer;
-      if (self->lut_file && self->lut_file[0] != '\0') {
-        self->lut_loaded = [renderer loadLUTFromFile:self->lut_file];
-        if (!self->lut_loaded) {
-          GST_WARNING_OBJECT (self, "Failed to load LUT: %s",
-                             self->lut_file);
-        }
-      } else {
-        [renderer clearLUT];
-        self->lut_loaded = FALSE;
-      }
+      lut = [renderer newLUTFromFile:lut_file size:&lut_size];
     }
+    lut_ok = lut != nil;
+    if (!lut_ok)
+      GST_WARNING_OBJECT (self, "Failed to load LUT: %s", lut_file);
   }
 
   GST_OBJECT_LOCK (self);
+  if (reload) {
+    g_free (self->lut_file);
+    self->lut_file = lut_file;
+    self->lut_loaded = lut != nil;
+    if (renderer && lut_ok)
+      [renderer stageLUT:lut size:lut_size];
+  }
   self->brightness = self->pending_brightness;
   self->contrast = self->pending_contrast;
   self->saturation = self->pending_saturation;

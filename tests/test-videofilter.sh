@@ -224,6 +224,19 @@ run_pipeline "NV12 with sharpness" \
     videotestsrc num-buffers=30 ! "video/x-raw,format=NV12,width=320,height=240" ! \
     vfmetalvideofilter sharpness=0.5 ! fakesink
 
+# --- 12. lut-file written while streaming ---
+# gst-launch cannot change a property between two buffers; this harness
+# does. pkg-config has to find gstreamer-check-1.0.
+echo "[Runtime LUT changes]"
+if [ -d "/Library/Frameworks/GStreamer.framework" ]; then
+    export PKG_CONFIG_PATH="/Library/Frameworks/GStreamer.framework/Libraries/pkgconfig:${PKG_CONFIG_PATH:-}"
+fi
+LUT_BIN="${BUILD_DIR}/test-videofilter-lut"
+run_test "lut-file written while streaming reaches the next buffer" \
+    sh -c "cc '${SCRIPT_DIR}/test-videofilter-lut.c' -o '${LUT_BIN}' \
+        \$(pkg-config --cflags --libs gstreamer-check-1.0 gstreamer-1.0) && \
+        GST_REGISTRY_FORK=no '${LUT_BIN}'"
+
 # --- Summary ---
 echo ""
 echo "=== Video filter results: ${PASS}/${TOTAL} passed, ${FAIL} failed ==="
