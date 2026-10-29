@@ -43,7 +43,28 @@ struct _GstVfMetalVideoFilter
 {
   GstVideoFilter videofilter;
 
-  /* Color adjustment properties */
+  /* The properties as last written; committed to the fields below in one
+   * step when the write's notifications are dispatched, so a batch (one
+   * g_object_set () or a freeze/thaw) is never seen half-applied. */
+  gdouble pending_brightness;
+  gdouble pending_contrast;
+  gdouble pending_saturation;
+  gdouble pending_hue;
+  gdouble pending_gamma;
+  gdouble pending_sharpness;
+  gdouble pending_sepia;
+  gboolean pending_invert;
+  gdouble pending_noise;
+  gdouble pending_vignette;
+  gboolean pending_chroma_key_enabled;
+  guint pending_chroma_key_color;
+  gdouble pending_chroma_key_tolerance;
+  gdouble pending_chroma_key_smoothness;
+  gchar *pending_lut_file;
+
+  /* The committed properties, what the streaming thread reads */
+
+  /* Color adjustment */
   gdouble brightness;       /* [-1.0, 1.0], default 0.0 */
   gdouble contrast;         /* [0.0, 2.0], default 1.0 */
   gdouble saturation;       /* [0.0, 2.0], default 1.0 */
@@ -67,6 +88,7 @@ struct _GstVfMetalVideoFilter
 
   /* LUT */
   gchar *lut_file;          /* path to .cube or .png LUT file */
+  gboolean lut_loaded;      /* lut_file was read into the renderer */
 
   /* Frame counter for noise randomization */
   guint64 frame_count;

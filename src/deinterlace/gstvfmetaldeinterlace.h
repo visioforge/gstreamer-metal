@@ -36,7 +36,14 @@ struct _GstVfMetalDeinterlace
 {
   GstVideoFilter videofilter;
 
-  /* Properties */
+  /* The properties as last written; committed to the fields below in one
+   * step when the write's notifications are dispatched, so a batch (one
+   * g_object_set () or a freeze/thaw) is never seen half-applied. */
+  gint pending_method;
+  gint pending_field_layout;
+  gdouble pending_motion_threshold;
+
+  /* The committed properties, what the streaming thread reads */
   gint method;              /* 0=bob, 1=weave, 2=linear, 3=greedyh */
   gint field_layout;        /* 0=auto, 1=top-first, 2=bottom-first */
   gdouble motion_threshold; /* for greedyh, [0, 1] */

@@ -36,7 +36,19 @@ struct _GstVfMetalOverlay
 {
   GstVideoFilter videofilter;
 
-  /* Properties */
+  /* The properties as last written; committed to the fields below in one
+   * step when the write's notifications are dispatched, so a batch (one
+   * g_object_set () or a freeze/thaw) is never seen half-applied. */
+  gchar *pending_location;
+  gint pending_x;
+  gint pending_y;
+  gint pending_width;
+  gint pending_height;
+  gdouble pending_alpha;
+  gdouble pending_relative_x;
+  gdouble pending_relative_y;
+
+  /* The committed properties, what the streaming thread reads */
   gchar *location;
   gint x;
   gint y;

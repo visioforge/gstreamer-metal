@@ -73,5 +73,6 @@ gst-launch-1.0 videotestsrc ! video/x-raw,format=BGRA,width=1920,height=1080 ! \
 - Passthrough mode is automatically enabled when input and output have the same format and dimensions
 - Caps negotiation preserves display aspect ratio (DAR) when fixating output dimensions
 - Properties can be changed at runtime; the renderer reconfigures on the next frame
+- Properties written in one `g_object_set ()` call, or between `g_object_freeze_notify ()` and `g_object_thaw_notify ()`, take effect together: no buffer sees some of them applied and others not
 - Classification: `Filter/Converter/Video/Scaler`
 - Rank: `GST_RANK_NONE`

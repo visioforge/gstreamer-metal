@@ -65,6 +65,8 @@ gst-launch-1.0 videotestsrc ! video/x-raw,format=BGRA,width=640,height=480 ! \
 ## Notes
 
 - The image is loaded when the `location` property is set; it can be changed at runtime
+- Properties written in one `g_object_set ()` call, or between `g_object_freeze_notify ()` and `g_object_thaw_notify ()`, take effect together: no buffer sees some of them applied and others not (moving and resizing the overlay at once never draws the new position with the old size)
+- Writing the `location` it already has does not reload the file once it loaded (a load that failed is retried); to pick up a file replaced under the same path, set another path (or an empty string) first. The loaded file survives a stop and restart of the element
 - Setting `location` to an empty string or null clears the overlay and re-enables passthrough
 - If the image file cannot be loaded, a warning is emitted and the element remains in passthrough
 - The overlay image is uploaded to a Metal texture once on load; subsequent frames reuse the cached texture

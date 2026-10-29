@@ -220,41 +220,80 @@ gst_vf_metal_overlay_set_property (GObject * object, guint prop_id,
   GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_LOCATION:
-      g_free (self->location);
-      self->location = g_value_dup_string (value);
+      g_free (self->pending_location);
+      self->pending_location = g_value_dup_string (value);
       break;
     case PROP_X:
-      self->x = g_value_get_int (value);
+      self->pending_x = g_value_get_int (value);
       break;
     case PROP_Y:
-      self->y = g_value_get_int (value);
+      self->pending_y = g_value_get_int (value);
       break;
     case PROP_WIDTH:
-      self->width = g_value_get_int (value);
+      self->pending_width = g_value_get_int (value);
       break;
     case PROP_HEIGHT:
-      self->height = g_value_get_int (value);
+      self->pending_height = g_value_get_int (value);
       break;
     case PROP_ALPHA:
-      self->alpha = g_value_get_double (value);
+      self->pending_alpha = g_value_get_double (value);
       break;
     case PROP_RELATIVE_X:
-      self->relative_x = g_value_get_double (value);
+      self->pending_relative_x = g_value_get_double (value);
       break;
     case PROP_RELATIVE_Y:
-      self->relative_y = g_value_get_double (value);
+      self->pending_relative_y = g_value_get_double (value);
       break;
     default:
       GST_OBJECT_UNLOCK (self);
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       return;
   }
+  /* dispatch_properties_changed commits it, with the rest of the batch */
+  GST_OBJECT_UNLOCK (self);
+}
+
+/* GObject calls this once per batch of writes, after the last one: right
+ * after a single g_object_set_property (), at the end of a g_object_set ()
+ * with several properties, or at the g_object_thaw_notify () that ends a
+ * freeze. Committing here means the streaming thread never draws a position
+ * and a size that were never set together. */
+static void
+gst_vf_metal_overlay_dispatch_properties_changed (GObject * object,
+    guint n_pspecs, GParamSpec ** pspecs)
+{
+  GstVfMetalOverlay *self = GST_VF_METAL_OVERLAY (object);
+
+  /* A new path, or the same one after a load that failed: (re)load it. The
+   * same path loaded already is not read again. */
+  GST_OBJECT_LOCK (self);
+  gboolean reload =
+      g_strcmp0 (self->location, self->pending_location) != 0 ||
+      (!self->image_loaded && self->pending_location &&
+      *self->pending_location != '\0');
+  if (reload) {
+    g_free (self->location);
+    self->location = g_strdup (self->pending_location);
+  }
   GST_OBJECT_UNLOCK (self);
 
-  /* Image loading outside lock (involves Metal GPU operations) */
-  if (prop_id == PROP_LOCATION) {
+  /* The image first, outside the lock (Metal GPU work), then the geometry:
+   * frames drawn while the file loads keep the old image in the old place. */
+  if (reload)
     gst_vf_metal_overlay_load_image (self);
-  }
+
+  GST_OBJECT_LOCK (self);
+  self->x = self->pending_x;
+  self->y = self->pending_y;
+  self->width = self->pending_width;
+  self->height = self->pending_height;
+  self->alpha = self->pending_alpha;
+  self->relative_x = self->pending_relative_x;
+  self->relative_y = self->pending_relative_y;
+  GST_OBJECT_UNLOCK (self);
+
+  G_OBJECT_CLASS (parent_class)->dispatch_properties_changed (object,
+      n_pspecs, pspecs);
 }
 
 static void
@@ -266,28 +305,28 @@ gst_vf_metal_overlay_get_property (GObject * object, guint prop_id,
   GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_LOCATION:
-      g_value_set_string (value, self->location);
+      g_value_set_string (value, self->pending_location);
       break;
     case PROP_X:
-      g_value_set_int (value, self->x);
+      g_value_set_int (value, self->pending_x);
       break;
     case PROP_Y:
-      g_value_set_int (value, self->y);
+      g_value_set_int (value, self->pending_y);
       break;
     case PROP_WIDTH:
-      g_value_set_int (value, self->width);
+      g_value_set_int (value, self->pending_width);
       break;
     case PROP_HEIGHT:
-      g_value_set_int (value, self->height);
+      g_value_set_int (value, self->pending_height);
       break;
     case PROP_ALPHA:
-      g_value_set_double (value, self->alpha);
+      g_value_set_double (value, self->pending_alpha);
       break;
     case PROP_RELATIVE_X:
-      g_value_set_double (value, self->relative_x);
+      g_value_set_double (value, self->pending_relative_x);
       break;
     case PROP_RELATIVE_Y:
-      g_value_set_double (value, self->relative_y);
+      g_value_set_double (value, self->pending_relative_y);
       break;
     default:
       GST_OBJECT_UNLOCK (self);
@@ -334,6 +373,8 @@ gst_vf_metal_overlay_finalize (GObject * object)
 
   g_free (self->location);
   self->location = NULL;
+  g_free (self->pending_location);
+  self->pending_location = NULL;
 
   if (self->renderer) {
     @autoreleasepool {
@@ -360,6 +401,8 @@ gst_vf_metal_overlay_class_init (GstVfMetalOverlayClass * klass)
   gobject_class->set_property = gst_vf_metal_overlay_set_property;
   gobject_class->get_property = gst_vf_metal_overlay_get_property;
   gobject_class->finalize = gst_vf_metal_overlay_finalize;
+  gobject_class->dispatch_properties_changed =
+      gst_vf_metal_overlay_dispatch_properties_changed;
 
   gstelement_class->change_state =
       GST_DEBUG_FUNCPTR (gst_vf_metal_overlay_change_state);
@@ -446,6 +489,14 @@ gst_vf_metal_overlay_init (GstVfMetalOverlay * self)
   self->alpha = DEFAULT_ALPHA;
   self->relative_x = DEFAULT_RELATIVE;
   self->relative_y = DEFAULT_RELATIVE;
+  self->pending_location = NULL;
+  self->pending_x = DEFAULT_X;
+  self->pending_y = DEFAULT_Y;
+  self->pending_width = DEFAULT_WIDTH;
+  self->pending_height = DEFAULT_HEIGHT;
+  self->pending_alpha = DEFAULT_ALPHA;
+  self->pending_relative_x = DEFAULT_RELATIVE;
+  self->pending_relative_y = DEFAULT_RELATIVE;
   self->image_loaded = FALSE;
 
   @autoreleasepool {

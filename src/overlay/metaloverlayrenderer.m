@@ -408,7 +408,8 @@ typedef struct {
     [_textureCache clear];
     _renderTarget = nil;
     [_yuvOutput cleanup];
-    _overlayTexture = nil;
+    /* _overlayTexture stays: it does not depend on the caps, and the element
+     * does not load the same location again after a restart. */
     for (int f = 0; f < VF_METAL_INPUT_COUNT; f++)
         _pipelines[f] = nil;
 }

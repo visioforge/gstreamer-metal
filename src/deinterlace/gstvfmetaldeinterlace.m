@@ -258,20 +258,42 @@ gst_vf_metal_deinterlace_set_property (GObject * object, guint prop_id,
   GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_METHOD:
-      self->method = g_value_get_enum (value);
+      self->pending_method = g_value_get_enum (value);
       break;
     case PROP_FIELD_LAYOUT:
-      self->field_layout = g_value_get_enum (value);
+      self->pending_field_layout = g_value_get_enum (value);
       break;
     case PROP_MOTION_THRESHOLD:
-      self->motion_threshold = g_value_get_double (value);
+      self->pending_motion_threshold = g_value_get_double (value);
       break;
     default:
       GST_OBJECT_UNLOCK (self);
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       return;
   }
+  /* dispatch_properties_changed commits it, with the rest of the batch */
   GST_OBJECT_UNLOCK (self);
+}
+
+/* GObject calls this once per batch of writes, after the last one: right
+ * after a single g_object_set_property (), at the end of a g_object_set ()
+ * with several properties, or at the g_object_thaw_notify () that ends a
+ * freeze. Committing here means the streaming thread never sees settings
+ * that were never set together. */
+static void
+gst_vf_metal_deinterlace_dispatch_properties_changed (GObject * object,
+    guint n_pspecs, GParamSpec ** pspecs)
+{
+  GstVfMetalDeinterlace *self = GST_VF_METAL_DEINTERLACE (object);
+
+  GST_OBJECT_LOCK (self);
+  self->method = self->pending_method;
+  self->field_layout = self->pending_field_layout;
+  self->motion_threshold = self->pending_motion_threshold;
+  GST_OBJECT_UNLOCK (self);
+
+  G_OBJECT_CLASS (parent_class)->dispatch_properties_changed (object,
+      n_pspecs, pspecs);
 }
 
 static void
@@ -283,13 +305,13 @@ gst_vf_metal_deinterlace_get_property (GObject * object, guint prop_id,
   GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_METHOD:
-      g_value_set_enum (value, self->method);
+      g_value_set_enum (value, self->pending_method);
       break;
     case PROP_FIELD_LAYOUT:
-      g_value_set_enum (value, self->field_layout);
+      g_value_set_enum (value, self->pending_field_layout);
       break;
     case PROP_MOTION_THRESHOLD:
-      g_value_set_double (value, self->motion_threshold);
+      g_value_set_double (value, self->pending_motion_threshold);
       break;
     default:
       GST_OBJECT_UNLOCK (self);
@@ -360,6 +382,8 @@ gst_vf_metal_deinterlace_class_init (GstVfMetalDeinterlaceClass * klass)
   gobject_class->set_property = gst_vf_metal_deinterlace_set_property;
   gobject_class->get_property = gst_vf_metal_deinterlace_get_property;
   gobject_class->finalize = gst_vf_metal_deinterlace_finalize;
+  gobject_class->dispatch_properties_changed =
+      gst_vf_metal_deinterlace_dispatch_properties_changed;
 
   gstelement_class->change_state =
       GST_DEBUG_FUNCPTR (gst_vf_metal_deinterlace_change_state);
@@ -410,6 +434,9 @@ gst_vf_metal_deinterlace_init (GstVfMetalDeinterlace * self)
   self->method = DEFAULT_METHOD;
   self->field_layout = DEFAULT_FIELD_LAYOUT;
   self->motion_threshold = DEFAULT_MOTION_THRESHOLD;
+  self->pending_method = self->method;
+  self->pending_field_layout = self->field_layout;
+  self->pending_motion_threshold = self->motion_threshold;
 
   @autoreleasepool {
     MetalDeinterlaceRenderer *renderer =
