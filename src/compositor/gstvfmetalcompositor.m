@@ -542,6 +542,14 @@ gst_vf_metal_compositor_aggregate_frames (GstVideoAggregator * vagg,
   MetalCompositorRenderer *renderer =
       (__bridge MetalCompositorRenderer *)self->renderer;
 
+  /* A live aggregator still aggregates on timeout after a failed
+   * negotiation. Drop this buffer so it retries the reconfigure it marked. */
+  if (!renderer.configured) {
+    GST_WARNING_OBJECT (vagg, "Metal renderer not configured, "
+        "waiting for renegotiation");
+    return GST_AGGREGATOR_FLOW_NEED_DATA;
+  }
+
   if (!gst_video_frame_map (&out_frame, &vagg->info, outbuf, GST_MAP_WRITE)) {
     GST_WARNING_OBJECT (vagg, "Could not map output buffer");
     return GST_FLOW_ERROR;

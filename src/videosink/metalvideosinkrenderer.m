@@ -340,11 +340,6 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
                  height:(int)height
                  format:(GstVideoFormat)format
 {
-    _videoWidth = width;
-    _videoHeight = height;
-    _videoFormat = format;
-    _inputFormatIndex = vf_metal_input_format_index (format);
-
     /* Create the pipelines not yet created (they don't depend on resolution),
      * so a set that failed halfway is completed by the next call */
     NSString *fragNames[VF_METAL_INPUT_COUNT] = {
@@ -363,6 +358,12 @@ vf_metal_destroy_window (NSWindow *window, VfMetalView *view)
             return NO;
         }
     }
+
+    /* Stored only once nothing can fail, so rejected caps leave no geometry */
+    _videoWidth = width;
+    _videoHeight = height;
+    _videoFormat = format;
+    _inputFormatIndex = vf_metal_input_format_index (format);
 
     _configured = YES;
 

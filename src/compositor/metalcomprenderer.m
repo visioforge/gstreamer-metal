@@ -359,19 +359,16 @@ fragment float4 checkerFragment(
     return YES;
 }
 
+- (BOOL)configured
+{
+    return _outputTexture != nil;
+}
+
 - (BOOL)compositeWithInputs:(MetalPadInput *)inputs
                       count:(int)count
                  background:(MetalBackgroundType)background
                    outFrame:(GstVideoFrame *)outFrame
 {
-    /* Nil after a failed rebuild. A live aggregator still aggregates on
-     * timeout when negotiation failed, so this is reachable. */
-    if (!_outputTexture) {
-        GST_ERROR ("MetalCompositorRenderer: Output texture not configured, "
-                   "the last negotiation failed");
-        return NO;
-    }
-
     @autoreleasepool {
         [_textureCache resetFrameIndex];
 
