@@ -281,6 +281,11 @@ fragment float4 checkerFragment(
 
     id<MTLDevice> device = [VfMetalDevice sharedDevice].device;
 
+    /* Set again only once every resource is built, so a rebuild that fails
+     * halfway is retried by the next call instead of matching the check
+     * above with stale resources. */
+    _outputTexture = nil;
+
     _outputWidth = width;
     _outputHeight = height;
     _outputFormat = format;
@@ -339,8 +344,8 @@ fragment float4 checkerFragment(
     desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     desc.storageMode = MTLStorageModeShared;
 
-    _outputTexture = [device newTextureWithDescriptor:desc];
-    if (!_outputTexture) {
+    id<MTLTexture> outputTexture = [device newTextureWithDescriptor:desc];
+    if (!outputTexture) {
         GST_ERROR ("MetalCompositorRenderer: Failed to create output texture %dx%d",
               width, height);
         return NO;
@@ -350,6 +355,7 @@ fragment float4 checkerFragment(
                                    width:width height:height format:format])
         return NO;
 
+    _outputTexture = outputTexture;
     return YES;
 }
 

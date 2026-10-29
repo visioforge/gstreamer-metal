@@ -426,6 +426,11 @@ parse_png_lut (const char *path, id<MTLDevice> device, int *outSize)
 
     id<MTLDevice> device = [VfMetalDevice sharedDevice].device;
 
+    /* Set again only once every resource is built, so a rebuild that fails
+     * halfway is retried by the next call instead of matching the check
+     * above with stale resources. */
+    _renderTarget = nil;
+
     _width = width;
     _height = height;
     _inputFormat = inFmt;
@@ -484,8 +489,8 @@ parse_png_lut (const char *path, id<MTLDevice> device, int *outSize)
                    MTLTextureUsageShaderWrite;
     rtDesc.storageMode = MTLStorageModeShared;
 
-    _renderTarget = [device newTextureWithDescriptor:rtDesc];
-    if (!_renderTarget) return NO;
+    id<MTLTexture> renderTarget = [device newTextureWithDescriptor:rtDesc];
+    if (!renderTarget) return NO;
 
     /* Create blur intermediate textures */
     MTLTextureDescriptor *blurDesc = [MTLTextureDescriptor
@@ -504,6 +509,7 @@ parse_png_lut (const char *path, id<MTLDevice> device, int *outSize)
                                    width:width height:height format:outFmt])
         return NO;
 
+    _renderTarget = renderTarget;
     return YES;
 }
 

@@ -175,6 +175,11 @@ build_uv_transform (VfMetalTransformMethod method, float *mat, float *offset)
 
     id<MTLDevice> device = [VfMetalDevice sharedDevice].device;
 
+    /* Set again only once every resource is built, so a rebuild that fails
+     * halfway is retried by the next call instead of matching the check
+     * above with stale resources. */
+    _renderTarget = nil;
+
     _inWidth = inW;
     _inHeight = inH;
     _outWidth = outW;
@@ -230,13 +235,14 @@ build_uv_transform (VfMetalTransformMethod method, float *mat, float *offset)
                    MTLTextureUsageShaderWrite;
     rtDesc.storageMode = MTLStorageModeShared;
 
-    _renderTarget = [device newTextureWithDescriptor:rtDesc];
-    if (!_renderTarget) return NO;
+    id<MTLTexture> renderTarget = [device newTextureWithDescriptor:rtDesc];
+    if (!renderTarget) return NO;
 
     if (![_yuvOutput configureWithDevice:device library:_library
                                    width:outW height:outH format:outFmt])
         return NO;
 
+    _renderTarget = renderTarget;
     return YES;
 }
 
