@@ -44,7 +44,14 @@ struct _GstVfMetalConvertScale
 {
   GstBaseTransform basetransform;
 
-  /* Properties */
+  /* The properties as last written; committed to the fields below in one
+   * step when the write's notifications are dispatched, so a batch (one
+   * g_object_set () or a freeze/thaw) is never seen half-applied. */
+  gint pending_method;
+  gboolean pending_add_borders;
+  guint32 pending_border_color;
+
+  /* The committed properties, what the renderer is configured with */
   gint method;              /* 0=bilinear, 1=nearest */
   gboolean add_borders;     /* letterbox/pillarbox */
   guint32 border_color;     /* ARGB border color */

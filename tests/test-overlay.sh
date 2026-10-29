@@ -125,6 +125,19 @@ if [ -f "$TEST_IMG" ]; then
             "video/x-raw,format=NV12,width=1920,height=1080" ! \
             vfmetaloverlay location="$TEST_IMG" relative-x=0.9 relative-y=0.05 ! \
             fakesink
+
+    # --- A batch of writes takes effect together ---
+    # gst-launch cannot put a buffer between two property writes; this harness
+    # does, on one thread. pkg-config has to find gstreamer-check-1.0.
+    echo "--- Batched property writes ---"
+    if [ -d "/Library/Frameworks/GStreamer.framework" ]; then
+        export PKG_CONFIG_PATH="/Library/Frameworks/GStreamer.framework/Libraries/pkgconfig:${PKG_CONFIG_PATH:-}"
+    fi
+    BATCH_BIN="${BUILD_DIR}/test-overlay-batch"
+    run_test "A buffer between two writes of a batch keeps the rectangle" \
+        sh -c "cc '${SCRIPT_DIR}/test-overlay-batch.c' -o '${BATCH_BIN}' \
+            \$(pkg-config --cflags --libs gstreamer-check-1.0 gstreamer-1.0) && \
+            GST_REGISTRY_FORK=no '${BATCH_BIN}' '${TEST_IMG}'"
 else
     echo "--- Skipping overlay tests (could not generate test image) ---"
 fi

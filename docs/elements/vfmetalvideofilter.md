@@ -102,6 +102,8 @@ gst-launch-1.0 videotestsrc ! video/x-raw,format=BGRA,width=640,height=480 ! \
 - The `noise` effect generates animated film grain that varies per-frame
 - The 3D LUT supports both `.cube` (Resolve/Adobe) and `.png` (strip) formats
 - Setting `lut-file` to null or empty string clears the LUT
+- Writing the `lut-file` it already has does not reload the file; to pick up a file replaced under the same path, set another path (or an empty string) first
 - Passthrough is re-evaluated whenever any property changes
+- Properties written in one `g_object_set ()` call, or between `g_object_freeze_notify ()` and `g_object_thaw_notify ()`, take effect together: no buffer sees some of them applied and others not
 - Classification: `Filter/Effect/Video`
 - Rank: `GST_RANK_NONE`

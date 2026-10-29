@@ -285,14 +285,20 @@ gst_vf_metal_convertscale_set_caps (GstBaseTransform * trans,
       gst_video_format_to_string (outFmt), outW, outH);
 
   if (!passthrough && self->renderer) {
+    GST_OBJECT_LOCK (self);
+    gint method = self->method;
+    gboolean add_borders = self->add_borders;
+    guint32 border_color = self->border_color;
+    GST_OBJECT_UNLOCK (self);
+
     @autoreleasepool {
       MetalConvertScaleRenderer *renderer =
           (__bridge MetalConvertScaleRenderer *)self->renderer;
       if (![renderer configureWithInputInfo:&self->in_info
                                  outputInfo:&self->out_info
-                                     method:(VfMetalScaleMethod)self->method
-                                 addBorders:self->add_borders
-                                borderColor:self->border_color]) {
+                                     method:(VfMetalScaleMethod)method
+                                 addBorders:add_borders
+                                borderColor:border_color]) {
         GST_ERROR_OBJECT (self, "Failed to configure Metal renderer");
         return FALSE;
       }
@@ -374,23 +380,48 @@ gst_vf_metal_convertscale_set_property (GObject * object, guint prop_id,
 {
   GstVfMetalConvertScale *self = GST_VF_METAL_CONVERTSCALE (object);
 
+  GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_METHOD:
-      self->method = g_value_get_enum (value);
+      self->pending_method = g_value_get_enum (value);
       break;
     case PROP_ADD_BORDERS:
-      self->add_borders = g_value_get_boolean (value);
+      self->pending_add_borders = g_value_get_boolean (value);
       break;
     case PROP_BORDER_COLOR:
-      self->border_color = g_value_get_uint (value);
+      self->pending_border_color = g_value_get_uint (value);
       break;
     default:
+      GST_OBJECT_UNLOCK (self);
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       return;
   }
+  /* dispatch_properties_changed commits it, with the rest of the batch */
+  GST_OBJECT_UNLOCK (self);
+}
+
+/* GObject calls this once per batch of writes, after the last one: right
+ * after a single g_object_set_property (), at the end of a g_object_set ()
+ * with several properties, or at the g_object_thaw_notify () that ends a
+ * freeze. Committing here means the renderer is never configured with
+ * settings that were never set together. */
+static void
+gst_vf_metal_convertscale_dispatch_properties_changed (GObject * object,
+    guint n_pspecs, GParamSpec ** pspecs)
+{
+  GstVfMetalConvertScale *self = GST_VF_METAL_CONVERTSCALE (object);
+
+  GST_OBJECT_LOCK (self);
+  gboolean changed = self->method != self->pending_method ||
+      self->add_borders != self->pending_add_borders ||
+      self->border_color != self->pending_border_color;
+  self->method = self->pending_method;
+  self->add_borders = self->pending_add_borders;
+  self->border_color = self->pending_border_color;
+  GST_OBJECT_UNLOCK (self);
 
   /* Reconfigure if caps already negotiated */
-  if (self->negotiated && self->renderer) {
+  if (changed && self->negotiated && self->renderer) {
     @autoreleasepool {
       MetalConvertScaleRenderer *renderer =
           (__bridge MetalConvertScaleRenderer *)self->renderer;
@@ -401,6 +432,9 @@ gst_vf_metal_convertscale_set_property (GObject * object, guint prop_id,
                            borderColor:self->border_color];
     }
   }
+
+  G_OBJECT_CLASS (parent_class)->dispatch_properties_changed (object,
+      n_pspecs, pspecs);
 }
 
 static void
@@ -409,20 +443,22 @@ gst_vf_metal_convertscale_get_property (GObject * object, guint prop_id,
 {
   GstVfMetalConvertScale *self = GST_VF_METAL_CONVERTSCALE (object);
 
+  GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_METHOD:
-      g_value_set_enum (value, self->method);
+      g_value_set_enum (value, self->pending_method);
       break;
     case PROP_ADD_BORDERS:
-      g_value_set_boolean (value, self->add_borders);
+      g_value_set_boolean (value, self->pending_add_borders);
       break;
     case PROP_BORDER_COLOR:
-      g_value_set_uint (value, self->border_color);
+      g_value_set_uint (value, self->pending_border_color);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  GST_OBJECT_UNLOCK (self);
 }
 
 /* --- State change --- */
@@ -487,6 +523,8 @@ gst_vf_metal_convertscale_class_init (GstVfMetalConvertScaleClass * klass)
   gobject_class->set_property = gst_vf_metal_convertscale_set_property;
   gobject_class->get_property = gst_vf_metal_convertscale_get_property;
   gobject_class->finalize = gst_vf_metal_convertscale_finalize;
+  gobject_class->dispatch_properties_changed =
+      gst_vf_metal_convertscale_dispatch_properties_changed;
 
   gstelement_class->change_state =
       GST_DEBUG_FUNCPTR (gst_vf_metal_convertscale_change_state);
@@ -547,6 +585,9 @@ gst_vf_metal_convertscale_init (GstVfMetalConvertScale * self)
   self->method = DEFAULT_METHOD;
   self->add_borders = DEFAULT_ADD_BORDERS;
   self->border_color = DEFAULT_BORDER_COLOR;
+  self->pending_method = self->method;
+  self->pending_add_borders = self->add_borders;
+  self->pending_border_color = self->border_color;
   self->negotiated = FALSE;
 
   @autoreleasepool {

@@ -225,60 +225,97 @@ gst_vf_metal_video_filter_set_property (GObject * object, guint prop_id,
   GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_BRIGHTNESS:
-      self->brightness = g_value_get_double (value);
+      self->pending_brightness = g_value_get_double (value);
       break;
     case PROP_CONTRAST:
-      self->contrast = g_value_get_double (value);
+      self->pending_contrast = g_value_get_double (value);
       break;
     case PROP_SATURATION:
-      self->saturation = g_value_get_double (value);
+      self->pending_saturation = g_value_get_double (value);
       break;
     case PROP_HUE:
-      self->hue = g_value_get_double (value);
+      self->pending_hue = g_value_get_double (value);
       break;
     case PROP_GAMMA:
-      self->gamma = g_value_get_double (value);
+      self->pending_gamma = g_value_get_double (value);
       break;
     case PROP_SHARPNESS:
-      self->sharpness = g_value_get_double (value);
+      self->pending_sharpness = g_value_get_double (value);
       break;
     case PROP_SEPIA:
-      self->sepia = g_value_get_double (value);
+      self->pending_sepia = g_value_get_double (value);
       break;
     case PROP_INVERT:
-      self->invert = g_value_get_boolean (value);
+      self->pending_invert = g_value_get_boolean (value);
       break;
     case PROP_NOISE:
-      self->noise = g_value_get_double (value);
+      self->pending_noise = g_value_get_double (value);
       break;
     case PROP_VIGNETTE:
-      self->vignette = g_value_get_double (value);
+      self->pending_vignette = g_value_get_double (value);
       break;
     case PROP_CHROMA_KEY_ENABLED:
-      self->chroma_key_enabled = g_value_get_boolean (value);
+      self->pending_chroma_key_enabled = g_value_get_boolean (value);
       break;
     case PROP_CHROMA_KEY_COLOR:
-      self->chroma_key_color = g_value_get_uint (value);
+      self->pending_chroma_key_color = g_value_get_uint (value);
       break;
     case PROP_CHROMA_KEY_TOLERANCE:
-      self->chroma_key_tolerance = g_value_get_double (value);
+      self->pending_chroma_key_tolerance = g_value_get_double (value);
       break;
     case PROP_CHROMA_KEY_SMOOTHNESS:
-      self->chroma_key_smoothness = g_value_get_double (value);
+      self->pending_chroma_key_smoothness = g_value_get_double (value);
       break;
     case PROP_LUT_FILE:
-      g_free (self->lut_file);
-      self->lut_file = g_value_dup_string (value);
+      g_free (self->pending_lut_file);
+      self->pending_lut_file = g_value_dup_string (value);
       break;
     default:
       GST_OBJECT_UNLOCK (self);
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       return;
   }
+  /* dispatch_properties_changed commits it, with the rest of the batch */
+  GST_OBJECT_UNLOCK (self);
+}
+
+/* GObject calls this once per batch of writes, after the last one: right
+ * after a single g_object_set_property (), at the end of a g_object_set ()
+ * with several properties, or at the g_object_thaw_notify () that ends a
+ * freeze. Committing here means the streaming thread never sees settings
+ * that were never set together. */
+static void
+gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
+    guint n_pspecs, GParamSpec ** pspecs)
+{
+  GstVfMetalVideoFilter *self = GST_VF_METAL_VIDEO_FILTER (object);
+
+  GST_OBJECT_LOCK (self);
+  self->brightness = self->pending_brightness;
+  self->contrast = self->pending_contrast;
+  self->saturation = self->pending_saturation;
+  self->hue = self->pending_hue;
+  self->gamma = self->pending_gamma;
+  self->sharpness = self->pending_sharpness;
+  self->sepia = self->pending_sepia;
+  self->invert = self->pending_invert;
+  self->noise = self->pending_noise;
+  self->vignette = self->pending_vignette;
+  self->chroma_key_enabled = self->pending_chroma_key_enabled;
+  self->chroma_key_color = self->pending_chroma_key_color;
+  self->chroma_key_tolerance = self->pending_chroma_key_tolerance;
+  self->chroma_key_smoothness = self->pending_chroma_key_smoothness;
+  gboolean lut_changed =
+      g_strcmp0 (self->lut_file, self->pending_lut_file) != 0;
+  if (lut_changed) {
+    g_free (self->lut_file);
+    self->lut_file = g_strdup (self->pending_lut_file);
+  }
   GST_OBJECT_UNLOCK (self);
 
-  /* LUT loading outside lock (involves Metal GPU operations) */
-  if (prop_id == PROP_LUT_FILE && self->renderer) {
+  /* LUT loading outside lock (involves Metal GPU operations); only for a new
+   * path, so rewriting the same lut-file does not reload the file. */
+  if (lut_changed && self->renderer) {
     @autoreleasepool {
       MetalVideoFilterRenderer *renderer =
           (__bridge MetalVideoFilterRenderer *)self->renderer;
@@ -294,6 +331,9 @@ gst_vf_metal_video_filter_set_property (GObject * object, guint prop_id,
   }
 
   gst_vf_metal_video_filter_update_passthrough (self);
+
+  G_OBJECT_CLASS (parent_class)->dispatch_properties_changed (object,
+      n_pspecs, pspecs);
 }
 
 static void
@@ -305,49 +345,49 @@ gst_vf_metal_video_filter_get_property (GObject * object, guint prop_id,
   GST_OBJECT_LOCK (self);
   switch (prop_id) {
     case PROP_BRIGHTNESS:
-      g_value_set_double (value, self->brightness);
+      g_value_set_double (value, self->pending_brightness);
       break;
     case PROP_CONTRAST:
-      g_value_set_double (value, self->contrast);
+      g_value_set_double (value, self->pending_contrast);
       break;
     case PROP_SATURATION:
-      g_value_set_double (value, self->saturation);
+      g_value_set_double (value, self->pending_saturation);
       break;
     case PROP_HUE:
-      g_value_set_double (value, self->hue);
+      g_value_set_double (value, self->pending_hue);
       break;
     case PROP_GAMMA:
-      g_value_set_double (value, self->gamma);
+      g_value_set_double (value, self->pending_gamma);
       break;
     case PROP_SHARPNESS:
-      g_value_set_double (value, self->sharpness);
+      g_value_set_double (value, self->pending_sharpness);
       break;
     case PROP_SEPIA:
-      g_value_set_double (value, self->sepia);
+      g_value_set_double (value, self->pending_sepia);
       break;
     case PROP_INVERT:
-      g_value_set_boolean (value, self->invert);
+      g_value_set_boolean (value, self->pending_invert);
       break;
     case PROP_NOISE:
-      g_value_set_double (value, self->noise);
+      g_value_set_double (value, self->pending_noise);
       break;
     case PROP_VIGNETTE:
-      g_value_set_double (value, self->vignette);
+      g_value_set_double (value, self->pending_vignette);
       break;
     case PROP_CHROMA_KEY_ENABLED:
-      g_value_set_boolean (value, self->chroma_key_enabled);
+      g_value_set_boolean (value, self->pending_chroma_key_enabled);
       break;
     case PROP_CHROMA_KEY_COLOR:
-      g_value_set_uint (value, self->chroma_key_color);
+      g_value_set_uint (value, self->pending_chroma_key_color);
       break;
     case PROP_CHROMA_KEY_TOLERANCE:
-      g_value_set_double (value, self->chroma_key_tolerance);
+      g_value_set_double (value, self->pending_chroma_key_tolerance);
       break;
     case PROP_CHROMA_KEY_SMOOTHNESS:
-      g_value_set_double (value, self->chroma_key_smoothness);
+      g_value_set_double (value, self->pending_chroma_key_smoothness);
       break;
     case PROP_LUT_FILE:
-      g_value_set_string (value, self->lut_file);
+      g_value_set_string (value, self->pending_lut_file);
       break;
     default:
       GST_OBJECT_UNLOCK (self);
@@ -405,6 +445,8 @@ gst_vf_metal_video_filter_finalize (GObject * object)
 
   g_free (self->lut_file);
   self->lut_file = NULL;
+  g_free (self->pending_lut_file);
+  self->pending_lut_file = NULL;
 
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
@@ -421,6 +463,8 @@ gst_vf_metal_video_filter_class_init (GstVfMetalVideoFilterClass * klass)
   gobject_class->set_property = gst_vf_metal_video_filter_set_property;
   gobject_class->get_property = gst_vf_metal_video_filter_get_property;
   gobject_class->finalize = gst_vf_metal_video_filter_finalize;
+  gobject_class->dispatch_properties_changed =
+      gst_vf_metal_video_filter_dispatch_properties_changed;
 
   gstelement_class->change_state =
       GST_DEBUG_FUNCPTR (gst_vf_metal_video_filter_change_state);
@@ -567,6 +611,21 @@ gst_vf_metal_video_filter_init (GstVfMetalVideoFilter * self)
   self->chroma_key_tolerance = DEFAULT_CHROMA_KEY_TOLERANCE;
   self->chroma_key_smoothness = DEFAULT_CHROMA_KEY_SMOOTHNESS;
   self->lut_file = NULL;
+  self->pending_brightness = self->brightness;
+  self->pending_contrast = self->contrast;
+  self->pending_saturation = self->saturation;
+  self->pending_hue = self->hue;
+  self->pending_gamma = self->gamma;
+  self->pending_sharpness = self->sharpness;
+  self->pending_sepia = self->sepia;
+  self->pending_invert = self->invert;
+  self->pending_noise = self->noise;
+  self->pending_vignette = self->vignette;
+  self->pending_chroma_key_enabled = self->chroma_key_enabled;
+  self->pending_chroma_key_color = self->chroma_key_color;
+  self->pending_chroma_key_tolerance = self->chroma_key_tolerance;
+  self->pending_chroma_key_smoothness = self->chroma_key_smoothness;
+  self->pending_lut_file = NULL;
   self->frame_count = 0;
 
   @autoreleasepool {
