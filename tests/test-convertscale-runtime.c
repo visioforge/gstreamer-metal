@@ -5,7 +5,11 @@
  *
  * A white 1920x1080 frame is scaled to 640x640. Without borders the top row
  * is white; after add-borders=TRUE with a red border-color the letterbox
- * puts red there. Exit code 0 means every check passed. */
+ * puts red there. Exit code 0 means every check passed.
+ *
+ * GstHarness pushes on the calling thread, so this proves the change reaches
+ * the renderer, not that the old cross-thread race is gone: that race is not
+ * reproducible deterministically. */
 
 #include <stdio.h>
 #include <string.h>

@@ -247,6 +247,29 @@ gst_vf_metal_convertscale_fixate_caps (GstBaseTransform * trans,
   return othercaps;
 }
 
+/* Configures the renderer for the negotiated caps and the committed
+ * settings. Called only on the streaming thread (set_caps, transform);
+ * returns at once when nothing changed. */
+static gboolean
+gst_vf_metal_convertscale_configure_renderer (GstVfMetalConvertScale * self)
+{
+  GST_OBJECT_LOCK (self);
+  gint method = self->method;
+  gboolean add_borders = self->add_borders;
+  guint32 border_color = self->border_color;
+  GST_OBJECT_UNLOCK (self);
+
+  @autoreleasepool {
+    MetalConvertScaleRenderer *renderer =
+        (__bridge MetalConvertScaleRenderer *)self->renderer;
+    return [renderer configureWithInputInfo:&self->in_info
+                                 outputInfo:&self->out_info
+                                     method:(VfMetalScaleMethod)method
+                                 addBorders:add_borders
+                                borderColor:border_color];
+  }
+}
+
 static gboolean
 gst_vf_metal_convertscale_set_caps (GstBaseTransform * trans,
     GstCaps * incaps, GstCaps * outcaps)
@@ -284,25 +307,10 @@ gst_vf_metal_convertscale_set_caps (GstBaseTransform * trans,
       gst_video_format_to_string (inFmt), inW, inH,
       gst_video_format_to_string (outFmt), outW, outH);
 
-  if (!passthrough && self->renderer) {
-    GST_OBJECT_LOCK (self);
-    gint method = self->method;
-    gboolean add_borders = self->add_borders;
-    guint32 border_color = self->border_color;
-    GST_OBJECT_UNLOCK (self);
-
-    @autoreleasepool {
-      MetalConvertScaleRenderer *renderer =
-          (__bridge MetalConvertScaleRenderer *)self->renderer;
-      if (![renderer configureWithInputInfo:&self->in_info
-                                 outputInfo:&self->out_info
-                                     method:(VfMetalScaleMethod)method
-                                 addBorders:add_borders
-                                borderColor:border_color]) {
-        GST_ERROR_OBJECT (self, "Failed to configure Metal renderer");
-        return FALSE;
-      }
-    }
+  if (!passthrough && self->renderer &&
+      !gst_vf_metal_convertscale_configure_renderer (self)) {
+    GST_ERROR_OBJECT (self, "Failed to configure Metal renderer");
+    return FALSE;
   }
 
   return TRUE;
@@ -342,28 +350,16 @@ gst_vf_metal_convertscale_transform (GstBaseTransform * trans,
     return GST_FLOW_ERROR;
   }
 
+  /* Settings committed since the last frame are applied here, on the
+   * streaming thread, so the renderer is never reconfigured mid-frame. */
+  if (!gst_vf_metal_convertscale_configure_renderer (self)) {
+    GST_ELEMENT_ERROR (self, RESOURCE, FAILED, (NULL),
+        ("Failed to configure Metal renderer"));
+    return GST_FLOW_ERROR;
+  }
+
   MetalConvertScaleRenderer *renderer =
       (__bridge MetalConvertScaleRenderer *)self->renderer;
-
-  /* Settings committed since the last frame are applied here, on the
-   * streaming thread, so the renderer is never reconfigured mid-frame.
-   * Unchanged settings make this a no-op. */
-  GST_OBJECT_LOCK (self);
-  gint method = self->method;
-  gboolean add_borders = self->add_borders;
-  guint32 border_color = self->border_color;
-  GST_OBJECT_UNLOCK (self);
-
-  @autoreleasepool {
-    if (![renderer configureWithInputInfo:&self->in_info
-                               outputInfo:&self->out_info
-                                   method:(VfMetalScaleMethod)method
-                               addBorders:add_borders
-                              borderColor:border_color]) {
-      GST_ERROR_OBJECT (self, "Failed to configure Metal renderer");
-      return GST_FLOW_ERROR;
-    }
-  }
 
   if (!gst_video_frame_map (&inframe, &self->in_info, inbuf, GST_MAP_READ)) {
     GST_ERROR_OBJECT (self, "Failed to map input buffer");

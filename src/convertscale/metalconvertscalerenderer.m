@@ -236,12 +236,15 @@ typedef struct {
     GstVideoFormat inFmt = GST_VIDEO_INFO_FORMAT (inInfo);
     GstVideoFormat outFmt = GST_VIDEO_INFO_FORMAT (outInfo);
 
-    /* Check if reconfigure is needed */
+    /* Same geometry and formats: no resource needs rebuilding. Method and
+     * borders are read per frame, so storing them is enough. */
     if (_renderTarget && _inWidth == inW && _inHeight == inH &&
         _outWidth == outW && _outHeight == outH &&
-        _inputFormat == inFmt && _outputFormat == outFmt &&
-        _method == method && _addBorders == addBorders &&
-        _borderColor == borderColor) {
+        _inputFormat == inFmt && _outputFormat == outFmt) {
+        _method = method;
+        _addBorders = addBorders;
+        _borderColor = borderColor;
+        [self _computeViewportWithAddBorders:addBorders];
         return YES;
     }
 
