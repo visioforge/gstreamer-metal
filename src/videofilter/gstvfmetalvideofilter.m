@@ -300,13 +300,18 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
 {
   GstVfMetalVideoFilter *self = GST_VF_METAL_VIDEO_FILTER (object);
 
-  /* A new path, or the same one after a load that failed: (re)load it. The
-   * same path loaded already is not read again. */
+  /* A lut-file write with a new path, or the same one after a load that
+   * failed: (re)load it. The same path loaded already is not read again, and
+   * a batch without lut-file never reads the file. */
+  gboolean lut_written = FALSE;
+  for (guint i = 0; i < n_pspecs; i++)
+    lut_written |= g_strcmp0 (pspecs[i]->name, "lut-file") == 0;
+
   GST_OBJECT_LOCK (self);
-  gboolean reload =
-      g_strcmp0 (self->lut_file, self->pending_lut_file) != 0 ||
+  gboolean reload = lut_written &&
+      (g_strcmp0 (self->lut_file, self->pending_lut_file) != 0 ||
       (!self->lut_loaded && self->pending_lut_file &&
-      *self->pending_lut_file != '\0');
+      *self->pending_lut_file != '\0'));
   gchar *lut_file = NULL;
   guint lut_load = 0;
   if (reload) {

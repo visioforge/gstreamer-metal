@@ -87,6 +87,9 @@ main (int argc, char **argv)
   name = g_strdup_printf ("vfmetal-missing-%d.cube", (int) getpid ());
   gchar *missing = g_build_filename (g_get_tmp_dir (), name, NULL);
   g_free (name);
+  name = g_strdup_printf ("vfmetal-late-%d.cube", (int) getpid ());
+  gchar *late = g_build_filename (g_get_tmp_dir (), name, NULL);
+  g_free (name);
   FILE *f = fopen (lut, "w");
   if (!f) {
     printf ("  FAIL  cannot write %s\n", lut);
@@ -99,6 +102,7 @@ main (int argc, char **argv)
         fprintf (f, "%d %d %d\n", 1 - r, 1 - g, 1 - b);
   fclose (f);
   g_remove (missing);
+  g_remove (late);
 
   GstHarness *h = gst_harness_new ("vfmetalvideofilter");
   gst_harness_set_src_caps_str (h,
@@ -147,10 +151,30 @@ main (int argc, char **argv)
   check_passthrough ("brightness set", h, FALSE);
   check_rgb ("the staged clear is applied", push_and_get_rgb (h), 0xFFFFFF);
 
+  /* A path that failed is read again only when lut-file itself is written:
+   * the file appears afterwards, an unrelated write leaves it unread. */
+  g_object_set (h->element, "lut-file", late, NULL);
+  gchar *cube = NULL;
+  gsize cube_len = 0;
+  if (!g_file_get_contents (lut, &cube, &cube_len, NULL) ||
+      !g_file_set_contents (late, cube, cube_len, NULL)) {
+    printf ("  FAIL  cannot write %s\n", late);
+    failures++;
+  }
+  g_free (cube);
+  g_object_set (h->element, "brightness", 0.2, NULL);
+  check_rgb ("an unrelated write does not retry a failed path",
+      push_and_get_rgb (h), 0xFFFFFF);
+  g_object_set (h->element, "lut-file", late, NULL);
+  check_rgb ("writing the failed path again retries it",
+      push_and_get_rgb (h), 0x000000);
+
   gst_harness_teardown (h);
   g_remove (lut);
+  g_remove (late);
   g_free (lut);
   g_free (missing);
+  g_free (late);
 
   printf (failures ? "=== FAILED ===\n" : "=== PASSED ===\n");
   return failures ? 1 : 0;
