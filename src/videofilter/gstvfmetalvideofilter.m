@@ -137,9 +137,8 @@ gst_vf_metal_video_filter_update_passthrough (GstVfMetalVideoFilter * self)
   GST_OBJECT_UNLOCK (self);
 
   gst_base_transform_set_passthrough (GST_BASE_TRANSFORM (self), passthrough);
-  g_mutex_unlock (&self->passthrough_lock);
-
   GST_DEBUG_OBJECT (self, "passthrough = %s", passthrough ? "TRUE" : "FALSE");
+  g_mutex_unlock (&self->passthrough_lock);
 }
 
 /* --- set_info (called when caps are negotiated) --- */

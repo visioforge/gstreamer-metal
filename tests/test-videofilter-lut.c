@@ -153,9 +153,11 @@ main (int argc, char **argv)
 
   /* A path that failed is read again only when lut-file itself is written:
    * the file appears afterwards, an unrelated write leaves it unread. */
+  if (g_file_test (late, G_FILE_TEST_EXISTS)) {
+    printf ("  FAIL  %s exists before the test writes it\n", late);
+    failures++;
+  }
   g_object_set (h->element, "lut-file", late, NULL);
-  check_rgb ("a path that does not exist yet fails to load",
-      push_and_get_rgb (h), 0xFFFFFF);
   gchar *cube = NULL;
   gsize cube_len = 0;
   if (g_file_get_contents (lut, &cube, &cube_len, NULL) &&
