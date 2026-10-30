@@ -116,6 +116,10 @@ GST_ELEMENT_REGISTER_DEFINE (vfmetalvideofilter, "vfmetalvideofilter",
 static void
 gst_vf_metal_video_filter_update_passthrough (GstVfMetalVideoFilter * self)
 {
+  /* Two threads committing at once must not set passthrough in the opposite
+   * order from the one they read the settings in. set_passthrough takes the
+   * object lock, so the pair needs a lock of its own. */
+  g_mutex_lock (&self->passthrough_lock);
   GST_OBJECT_LOCK (self);
   gboolean passthrough =
       FLOAT_EQ(self->brightness, DEFAULT_BRIGHTNESS) &&
@@ -129,12 +133,12 @@ gst_vf_metal_video_filter_update_passthrough (GstVfMetalVideoFilter * self)
       FLOAT_EQ(self->noise, DEFAULT_NOISE) &&
       FLOAT_EQ(self->vignette, DEFAULT_VIGNETTE) &&
       (!self->chroma_key_enabled) &&
-      (self->lut_file == NULL || self->lut_file[0] == '\0');
+      !self->lut_active;
   GST_OBJECT_UNLOCK (self);
 
   gst_base_transform_set_passthrough (GST_BASE_TRANSFORM (self), passthrough);
-
   GST_DEBUG_OBJECT (self, "passthrough = %s", passthrough ? "TRUE" : "FALSE");
+  g_mutex_unlock (&self->passthrough_lock);
 }
 
 /* --- set_info (called when caps are negotiated) --- */
@@ -162,6 +166,26 @@ gst_vf_metal_video_filter_set_info (GstVideoFilter * filter,
   }
 
   return TRUE;
+}
+
+/* --- before_transform --- */
+
+/* basetransform calls this for every buffer, in passthrough too, where
+ * transform_frame does not run: install a staged LUT here as well, so a
+ * clear that turned passthrough on drops the old texture now rather than
+ * when an effect next leaves passthrough. Same thread as transform_frame. */
+static void
+gst_vf_metal_video_filter_before_transform (GstBaseTransform * trans,
+    GstBuffer * buffer)
+{
+  GstVfMetalVideoFilter *self = GST_VF_METAL_VIDEO_FILTER (trans);
+
+  if (!self->renderer)
+    return;
+
+  GST_OBJECT_LOCK (self);
+  [(__bridge MetalVideoFilterRenderer *)self->renderer applyStagedLUT];
+  GST_OBJECT_UNLOCK (self);
 }
 
 /* --- transform_frame --- */
@@ -292,13 +316,19 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
 {
   GstVfMetalVideoFilter *self = GST_VF_METAL_VIDEO_FILTER (object);
 
-  /* A new path, or the same one after a load that failed: (re)load it. The
-   * same path loaded already is not read again. */
+  /* A lut-file write with a new path, or the same one after a load that
+   * failed: (re)load it. The same path loaded already is not read again, and
+   * a batch without lut-file never reads the file. */
+  gboolean lut_written = FALSE;
+  for (guint i = 0; i < n_pspecs; i++)
+    lut_written |= pspecs[i]->owner_type == GST_TYPE_VF_METAL_VIDEO_FILTER &&
+        pspecs[i]->param_id == PROP_LUT_FILE;
+
   GST_OBJECT_LOCK (self);
-  gboolean reload =
-      g_strcmp0 (self->lut_file, self->pending_lut_file) != 0 ||
+  gboolean reload = lut_written &&
+      (g_strcmp0 (self->lut_file, self->pending_lut_file) != 0 ||
       (!self->lut_loaded && self->pending_lut_file &&
-      *self->pending_lut_file != '\0');
+      *self->pending_lut_file != '\0'));
   gchar *lut_file = NULL;
   guint lut_load = 0;
   if (reload) {
@@ -313,8 +343,8 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
       (__bridge MetalVideoFilterRenderer *)self->renderer;
 
   /* The file is read here, outside the lock; the renderer only gets the
-   * texture on the streaming thread (transform_frame), with the parameters
-   * committed below. Frames drawn while the file loads keep the old LUT and
+   * texture on the streaming thread (before_transform and transform_frame),
+   * with the parameters committed below. Frames drawn while the file loads keep the old LUT and
    * the old look. A failed load keeps the old LUT. */
   gboolean clear = !lut_file || lut_file[0] == '\0';
   id<MTLTexture> lut = nil;
@@ -332,8 +362,10 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
   /* A reload started while this file loaded wins, even for the same path */
   if (reload && lut_load == self->lut_load) {
     self->lut_loaded = lut != nil;
-    if (renderer && (lut || clear))
+    if (renderer && (lut || clear)) {
       [renderer stageLUT:lut size:lut_size];
+      self->lut_active = lut != nil;
+    }
   }
   g_free (lut_file);
   self->brightness = self->pending_brightness;
@@ -469,6 +501,7 @@ gst_vf_metal_video_filter_finalize (GObject * object)
   self->lut_file = NULL;
   g_free (self->pending_lut_file);
   self->pending_lut_file = NULL;
+  g_mutex_clear (&self->passthrough_lock);
 
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
@@ -480,6 +513,7 @@ gst_vf_metal_video_filter_class_init (GstVfMetalVideoFilterClass * klass)
 {
   GObjectClass *gobject_class = (GObjectClass *) klass;
   GstElementClass *gstelement_class = (GstElementClass *) klass;
+  GstBaseTransformClass *basetransform_class = (GstBaseTransformClass *) klass;
   GstVideoFilterClass *gstvideofilter_class = (GstVideoFilterClass *) klass;
 
   gobject_class->set_property = gst_vf_metal_video_filter_set_property;
@@ -490,6 +524,9 @@ gst_vf_metal_video_filter_class_init (GstVfMetalVideoFilterClass * klass)
 
   gstelement_class->change_state =
       GST_DEBUG_FUNCPTR (gst_vf_metal_video_filter_change_state);
+
+  basetransform_class->before_transform =
+      GST_DEBUG_FUNCPTR (gst_vf_metal_video_filter_before_transform);
 
   gstvideofilter_class->set_info =
       GST_DEBUG_FUNCPTR (gst_vf_metal_video_filter_set_info);
@@ -649,7 +686,9 @@ gst_vf_metal_video_filter_init (GstVfMetalVideoFilter * self)
   self->pending_chroma_key_smoothness = self->chroma_key_smoothness;
   self->pending_lut_file = NULL;
   self->lut_loaded = FALSE;
+  self->lut_active = FALSE;
   self->frame_count = 0;
+  g_mutex_init (&self->passthrough_lock);
 
   @autoreleasepool {
     MetalVideoFilterRenderer *renderer =

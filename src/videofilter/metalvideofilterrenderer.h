@@ -67,7 +67,8 @@ typedef struct {
 - (void)stageLUT:(id<MTLTexture>)lut size:(int)size;
 
 /* Install the staged LUT, if any; called on the streaming thread before
- * a frame, so a frame never sees the LUT change under it. */
+ * a frame (and before a passthrough buffer), so a frame never sees the LUT
+ * change under it. */
 - (void)applyStagedLUT;
 
 /* Lifecycle */
