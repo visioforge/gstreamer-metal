@@ -74,27 +74,29 @@ gst_vf_metal_compositor_pad_get_property (GObject * object, guint prop_id,
 {
   GstVfMetalCompositorPad *pad = GST_VF_METAL_COMPOSITOR_PAD (object);
 
+  /* The values written last, committed or not, as in vfmetaloverlay */
+  GST_OBJECT_LOCK (pad);
   switch (prop_id) {
     case PROP_PAD_XPOS:
-      g_value_set_int (value, pad->xpos);
+      g_value_set_int (value, pad->pending_xpos);
       break;
     case PROP_PAD_YPOS:
-      g_value_set_int (value, pad->ypos);
+      g_value_set_int (value, pad->pending_ypos);
       break;
     case PROP_PAD_WIDTH:
-      g_value_set_int (value, pad->width);
+      g_value_set_int (value, pad->pending_width);
       break;
     case PROP_PAD_HEIGHT:
-      g_value_set_int (value, pad->height);
+      g_value_set_int (value, pad->pending_height);
       break;
     case PROP_PAD_ALPHA:
-      g_value_set_double (value, pad->alpha);
+      g_value_set_double (value, pad->pending_alpha);
       break;
     case PROP_PAD_OPERATOR:
       g_value_set_enum (value, pad->op);
       break;
     case PROP_PAD_SIZING_POLICY:
-      g_value_set_enum (value, pad->sizing_policy);
+      g_value_set_enum (value, pad->pending_sizing_policy);
       break;
     case PROP_PAD_ZORDER:
       g_value_set_uint (value, pad->zorder);
@@ -103,6 +105,7 @@ gst_vf_metal_compositor_pad_get_property (GObject * object, guint prop_id,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  GST_OBJECT_UNLOCK (pad);
 }
 
 static void
@@ -111,21 +114,33 @@ gst_vf_metal_compositor_pad_set_property (GObject * object, guint prop_id,
 {
   GstVfMetalCompositorPad *pad = GST_VF_METAL_COMPOSITOR_PAD (object);
 
+  /* The rectangle and alpha go to pending_*; dispatch_properties_changed
+   * commits them with the rest of the batch */
   switch (prop_id) {
     case PROP_PAD_XPOS:
-      pad->xpos = g_value_get_int (value);
+      GST_OBJECT_LOCK (pad);
+      pad->pending_xpos = g_value_get_int (value);
+      GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_YPOS:
-      pad->ypos = g_value_get_int (value);
+      GST_OBJECT_LOCK (pad);
+      pad->pending_ypos = g_value_get_int (value);
+      GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_WIDTH:
-      pad->width = g_value_get_int (value);
+      GST_OBJECT_LOCK (pad);
+      pad->pending_width = g_value_get_int (value);
+      GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_HEIGHT:
-      pad->height = g_value_get_int (value);
+      GST_OBJECT_LOCK (pad);
+      pad->pending_height = g_value_get_int (value);
+      GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_ALPHA:
-      pad->alpha = g_value_get_double (value);
+      GST_OBJECT_LOCK (pad);
+      pad->pending_alpha = g_value_get_double (value);
+      GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_OPERATOR:
       pad->op = g_value_get_enum (value);
@@ -133,7 +148,9 @@ gst_vf_metal_compositor_pad_set_property (GObject * object, guint prop_id,
           pad->op == VF_METAL_COMPOSITOR_OPERATOR_ADD);
       break;
     case PROP_PAD_SIZING_POLICY:
-      pad->sizing_policy = g_value_get_enum (value);
+      GST_OBJECT_LOCK (pad);
+      pad->pending_sizing_policy = g_value_get_enum (value);
+      GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_ZORDER:
       pad->zorder = g_value_get_uint (value);
@@ -152,6 +169,39 @@ gst_vf_metal_compositor_pad_set_property (GObject * object, guint prop_id,
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+}
+
+/* GObject calls this once per batch of writes, after the last one: right
+ * after a single g_object_set_property (), at the end of a g_object_set ()
+ * with several properties, or at the g_object_thaw_notify () that ends a
+ * freeze. The commit takes the element's object lock, which aggregate_frames
+ * and prepare_frame_start hold while they read the rectangle, so no frame is
+ * drawn with a position and a size that were never set together. */
+static void
+gst_vf_metal_compositor_pad_dispatch_properties_changed (GObject * object,
+    guint n_pspecs, GParamSpec ** pspecs)
+{
+  GstVfMetalCompositorPad *pad = GST_VF_METAL_COMPOSITOR_PAD (object);
+  GstElement *element = gst_pad_get_parent_element (GST_PAD (pad));
+
+  /* Element lock, then pad lock: the order GstElement itself takes them */
+  if (element)
+    GST_OBJECT_LOCK (element);
+  GST_OBJECT_LOCK (pad);
+  pad->xpos = pad->pending_xpos;
+  pad->ypos = pad->pending_ypos;
+  pad->width = pad->pending_width;
+  pad->height = pad->pending_height;
+  pad->alpha = pad->pending_alpha;
+  pad->sizing_policy = pad->pending_sizing_policy;
+  GST_OBJECT_UNLOCK (pad);
+  if (element) {
+    GST_OBJECT_UNLOCK (element);
+    gst_object_unref (element);
+  }
+
+  G_OBJECT_CLASS (gst_vf_metal_compositor_pad_parent_class)->
+      dispatch_properties_changed (object, n_pspecs, pspecs);
 }
 
 /* --- prepare_frame_start --- */
@@ -187,14 +237,19 @@ gst_vf_metal_compositor_pad_prepare_frame_start (GstVideoAggregatorPad * pad,
   GList *l;
   GstVideoRectangle frame_rect;
 
+  if (gst_aggregator_pad_is_inactive (GST_AGGREGATOR_PAD (pad)))
+    return;
+
+  /* The element lock for the whole check: dispatch_properties_changed
+   * commits a new rectangle under it, so this reads one committed batch */
+  GST_OBJECT_LOCK (vagg);
+
   /* Skip if fully transparent */
   if (cpad->alpha == 0.0) {
+    GST_OBJECT_UNLOCK (vagg);
     GST_DEBUG_OBJECT (pad, "Pad has alpha 0.0, not preparing frame");
     return;
   }
-
-  if (gst_aggregator_pad_is_inactive (GST_AGGREGATOR_PAD (pad)))
-    return;
 
   /* Use the shared size calculation that handles DAR and sizing policy */
   gst_vf_metal_compositor_pad_get_output_size (GST_VF_METAL_COMPOSITOR (vagg), cpad,
@@ -202,21 +257,23 @@ gst_vf_metal_compositor_pad_prepare_frame_start (GstVideoAggregatorPad * pad,
       GST_VIDEO_INFO_PAR_D (&vagg->info),
       &width, &height, &cpad->x_offset, &cpad->y_offset);
 
-  if (width == 0 || height == 0)
+  if (width == 0 || height == 0) {
+    GST_OBJECT_UNLOCK (vagg);
     return;
+  }
 
   frame_rect = pad_clamp_rectangle (cpad->xpos + cpad->x_offset,
       cpad->ypos + cpad->y_offset, width, height,
       GST_VIDEO_INFO_WIDTH (&vagg->info), GST_VIDEO_INFO_HEIGHT (&vagg->info));
 
   if (frame_rect.w == 0 || frame_rect.h == 0) {
+    GST_OBJECT_UNLOCK (vagg);
     GST_DEBUG_OBJECT (pad, "Resulting frame is zero-width or zero-height "
         "(w: %i, h: %i), skipping", frame_rect.w, frame_rect.h);
     return;
   }
 
   /* Check if this frame is obscured by a higher-zorder frame */
-  GST_OBJECT_LOCK (vagg);
   l = g_list_find (GST_ELEMENT (vagg)->sinkpads, pad);
   if (l)
     l = l->next;
@@ -278,6 +335,8 @@ gst_vf_metal_compositor_pad_class_init (GstVfMetalCompositorPadClass * klass)
 
   gobject_class->set_property = gst_vf_metal_compositor_pad_set_property;
   gobject_class->get_property = gst_vf_metal_compositor_pad_get_property;
+  gobject_class->dispatch_properties_changed =
+      gst_vf_metal_compositor_pad_dispatch_properties_changed;
 
   g_object_class_install_property (gobject_class, PROP_PAD_XPOS,
       g_param_spec_int ("xpos", "X Position", "X Position of the picture",
@@ -335,4 +394,10 @@ gst_vf_metal_compositor_pad_init (GstVfMetalCompositorPad * pad)
   pad->height = DEFAULT_PAD_HEIGHT;
   pad->sizing_policy = DEFAULT_PAD_SIZING_POLICY;
   pad->zorder = DEFAULT_PAD_ZORDER;
+  pad->pending_xpos = pad->xpos;
+  pad->pending_ypos = pad->ypos;
+  pad->pending_width = pad->width;
+  pad->pending_height = pad->height;
+  pad->pending_alpha = pad->alpha;
+  pad->pending_sizing_policy = pad->sizing_policy;
 }

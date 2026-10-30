@@ -111,6 +111,13 @@ struct _GstVfMetalCompositorPad
   GstVfMetalCompositorSizingPolicy sizing_policy;
   GstVfMetalCompositorOperator op;
 
+  /* What set_property wrote; dispatch_properties_changed commits it to the
+   * fields above as one batch */
+  gint pending_xpos, pending_ypos;
+  gint pending_width, pending_height;
+  gdouble pending_alpha;
+  GstVfMetalCompositorSizingPolicy pending_sizing_policy;
+
   /* Computed offsets for keep-aspect-ratio */
   gint x_offset;
   gint y_offset;
