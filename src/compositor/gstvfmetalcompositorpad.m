@@ -116,57 +116,43 @@ gst_vf_metal_compositor_pad_set_property (GObject * object, guint prop_id,
 
   /* Every property goes to pending; dispatch_properties_changed commits
    * them with the rest of the batch */
+  GST_OBJECT_LOCK (pad);
   switch (prop_id) {
     case PROP_PAD_XPOS:
-      GST_OBJECT_LOCK (pad);
       pad->pending.xpos = g_value_get_int (value);
-      GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_YPOS:
-      GST_OBJECT_LOCK (pad);
       pad->pending.ypos = g_value_get_int (value);
-      GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_WIDTH:
-      GST_OBJECT_LOCK (pad);
       pad->pending.width = g_value_get_int (value);
-      GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_HEIGHT:
-      GST_OBJECT_LOCK (pad);
       pad->pending.height = g_value_get_int (value);
-      GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_ALPHA:
-      GST_OBJECT_LOCK (pad);
       pad->pending.alpha = g_value_get_double (value);
-      GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_OPERATOR:
-    {
-      GstVfMetalCompositorOperator op = g_value_get_enum (value);
-      GST_OBJECT_LOCK (pad);
-      pad->pending.op = op;
-      GST_OBJECT_UNLOCK (pad);
-      /* A negotiation hint, not a drawn value: it applies at the write */
-      gst_video_aggregator_pad_set_needs_alpha (GST_VIDEO_AGGREGATOR_PAD (pad),
-          op == VF_METAL_COMPOSITOR_OPERATOR_ADD);
+      pad->pending.op = g_value_get_enum (value);
       break;
-    }
     case PROP_PAD_SIZING_POLICY:
-      GST_OBJECT_LOCK (pad);
       pad->pending.sizing_policy = g_value_get_enum (value);
-      GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_ZORDER:
-      GST_OBJECT_LOCK (pad);
       pad->pending.zorder = g_value_get_uint (value);
-      GST_OBJECT_UNLOCK (pad);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+  GST_OBJECT_UNLOCK (pad);
+
+  /* A negotiation hint, not a drawn value: it applies at the write. Outside
+   * the pad lock, as it takes it to find the parent */
+  if (prop_id == PROP_PAD_OPERATOR)
+    gst_video_aggregator_pad_set_needs_alpha (GST_VIDEO_AGGREGATOR_PAD (pad),
+        g_value_get_enum (value) == VF_METAL_COMPOSITOR_OPERATOR_ADD);
 }
 
 /* GObject calls this once per batch of writes, after the last one: right
@@ -183,24 +169,8 @@ gst_vf_metal_compositor_pad_dispatch_properties_changed (GObject * object,
   /* Only a batch that wrote a pad property commits: a caps notify or a
    * parent class property takes no lock */
   gboolean batched = FALSE;
-  for (guint i = 0; i < n_pspecs; i++) {
-    if (pspecs[i]->owner_type != GST_TYPE_VF_METAL_COMPOSITOR_PAD)
-      continue;
-    switch (pspecs[i]->param_id) {
-      case PROP_PAD_XPOS:
-      case PROP_PAD_YPOS:
-      case PROP_PAD_WIDTH:
-      case PROP_PAD_HEIGHT:
-      case PROP_PAD_ALPHA:
-      case PROP_PAD_OPERATOR:
-      case PROP_PAD_SIZING_POLICY:
-      case PROP_PAD_ZORDER:
-        batched = TRUE;
-        break;
-      default:
-        break;
-    }
-  }
+  for (guint i = 0; i < n_pspecs; i++)
+    batched |= pspecs[i]->owner_type == GST_TYPE_VF_METAL_COMPOSITOR_PAD;
 
   if (batched) {
     GST_OBJECT_LOCK (pad);
@@ -236,10 +206,12 @@ gst_vf_metal_compositor_snapshot_pads (GstElement * element)
   }
 
   /* gst_element_foreach_sink_pad () walks a copy, so a frame being
-   * prepared keeps its pads */
-  if (resort)
+   * prepared keeps its pads; a pad iterator resyncs on the cookie */
+  if (resort) {
     element->sinkpads = g_list_sort (element->sinkpads,
         (GCompareFunc) pad_zorder_compare);
+    element->pads_cookie++;
+  }
 }
 
 /* --- prepare_frame_start --- */
