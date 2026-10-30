@@ -61,6 +61,9 @@ struct _GstVfMetalOverlay
   /* State */
   gboolean image_loaded;
 
+  /* Held while passthrough is computed and set */
+  GMutex passthrough_lock;
+
   /* Metal rendering engine */
   void *renderer;
 };
