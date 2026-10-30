@@ -111,13 +111,19 @@ struct _GstVfMetalCompositorPad
   GstVfMetalCompositorSizingPolicy sizing_policy;
   GstVfMetalCompositorOperator op;
 
-  /* What set_property wrote; dispatch_properties_changed commits it to the
-   * fields above as one batch. zorder and operator are not batched: they
-   * apply at the write */
+  /* What set_property wrote. dispatch_properties_changed copies it to
+   * committed_* as one batch, and every output frame starts by copying
+   * committed_* to the fields above (gst_vf_metal_compositor_pad_snapshot),
+   * so one frame reads one batch throughout. zorder and operator are not
+   * batched: they apply at the write */
   gint pending_xpos, pending_ypos;
   gint pending_width, pending_height;
   gdouble pending_alpha;
   GstVfMetalCompositorSizingPolicy pending_sizing_policy;
+  gint committed_xpos, committed_ypos;
+  gint committed_width, committed_height;
+  gdouble committed_alpha;
+  GstVfMetalCompositorSizingPolicy committed_sizing_policy;
 
   /* Computed offsets for keep-aspect-ratio */
   gint x_offset;
@@ -125,6 +131,9 @@ struct _GstVfMetalCompositorPad
 };
 
 GST_ELEMENT_REGISTER_DECLARE (vfmetalcompositor);
+
+/* Call with the element's object lock held, on the aggregator thread */
+void gst_vf_metal_compositor_pad_snapshot (GstVfMetalCompositorPad * pad);
 
 static inline gint
 pad_zorder_compare (const GstVfMetalCompositorPad * pad1,

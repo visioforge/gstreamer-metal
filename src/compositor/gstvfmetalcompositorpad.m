@@ -174,9 +174,8 @@ gst_vf_metal_compositor_pad_set_property (GObject * object, guint prop_id,
 /* GObject calls this once per batch of writes, after the last one: right
  * after a single g_object_set_property (), at the end of a g_object_set ()
  * with several properties, or at the g_object_thaw_notify () that ends a
- * freeze. The commit takes the element's object lock, which aggregate_frames
- * and prepare_frame_start hold while they read the rectangle, so no frame is
- * drawn with a position and a size that were never set together. */
+ * freeze. The batch becomes the one the next output frame snapshots, so no
+ * frame is drawn with a position and a size that were never set together. */
 static void
 gst_vf_metal_compositor_pad_dispatch_properties_changed (GObject * object,
     guint n_pspecs, GParamSpec ** pspecs)
@@ -184,7 +183,7 @@ gst_vf_metal_compositor_pad_dispatch_properties_changed (GObject * object,
   GstVfMetalCompositorPad *pad = GST_VF_METAL_COMPOSITOR_PAD (object);
 
   /* Only a batch that wrote one of the six commits: a caps notify or a
-   * controller sync of another property costs no lock */
+   * controller sync of another property takes no lock */
   gboolean batched = FALSE;
   for (guint i = 0; i < n_pspecs; i++) {
     if (pspecs[i]->owner_type != GST_TYPE_VF_METAL_COMPOSITOR_PAD)
@@ -204,27 +203,32 @@ gst_vf_metal_compositor_pad_dispatch_properties_changed (GObject * object,
   }
 
   if (batched) {
-    GstElement *element = gst_pad_get_parent_element (GST_PAD (pad));
-
-    /* Element lock, then pad lock: the order GstElement itself takes them */
-    if (element)
-      GST_OBJECT_LOCK (element);
     GST_OBJECT_LOCK (pad);
-    pad->xpos = pad->pending_xpos;
-    pad->ypos = pad->pending_ypos;
-    pad->width = pad->pending_width;
-    pad->height = pad->pending_height;
-    pad->alpha = pad->pending_alpha;
-    pad->sizing_policy = pad->pending_sizing_policy;
+    pad->committed_xpos = pad->pending_xpos;
+    pad->committed_ypos = pad->pending_ypos;
+    pad->committed_width = pad->pending_width;
+    pad->committed_height = pad->pending_height;
+    pad->committed_alpha = pad->pending_alpha;
+    pad->committed_sizing_policy = pad->pending_sizing_policy;
     GST_OBJECT_UNLOCK (pad);
-    if (element) {
-      GST_OBJECT_UNLOCK (element);
-      gst_object_unref (element);
-    }
   }
 
   G_OBJECT_CLASS (gst_vf_metal_compositor_pad_parent_class)->
       dispatch_properties_changed (object, n_pspecs, pspecs);
+}
+
+void
+gst_vf_metal_compositor_pad_snapshot (GstVfMetalCompositorPad * pad)
+{
+  /* Element lock (held by the caller), then pad lock */
+  GST_OBJECT_LOCK (pad);
+  pad->xpos = pad->committed_xpos;
+  pad->ypos = pad->committed_ypos;
+  pad->width = pad->committed_width;
+  pad->height = pad->committed_height;
+  pad->alpha = pad->committed_alpha;
+  pad->sizing_policy = pad->committed_sizing_policy;
+  GST_OBJECT_UNLOCK (pad);
 }
 
 /* --- prepare_frame_start --- */
@@ -260,19 +264,14 @@ gst_vf_metal_compositor_pad_prepare_frame_start (GstVideoAggregatorPad * pad,
   GList *l;
   GstVideoRectangle frame_rect;
 
-  if (gst_aggregator_pad_is_inactive (GST_AGGREGATOR_PAD (pad)))
-    return;
-
-  /* The element lock for the whole check: dispatch_properties_changed
-   * commits a new rectangle under it, so this reads one committed batch */
-  GST_OBJECT_LOCK (vagg);
-
   /* Skip if fully transparent */
   if (cpad->alpha == 0.0) {
-    GST_OBJECT_UNLOCK (vagg);
     GST_DEBUG_OBJECT (pad, "Pad has alpha 0.0, not preparing frame");
     return;
   }
+
+  if (gst_aggregator_pad_is_inactive (GST_AGGREGATOR_PAD (pad)))
+    return;
 
   /* Use the shared size calculation that handles DAR and sizing policy */
   gst_vf_metal_compositor_pad_get_output_size (GST_VF_METAL_COMPOSITOR (vagg), cpad,
@@ -280,23 +279,21 @@ gst_vf_metal_compositor_pad_prepare_frame_start (GstVideoAggregatorPad * pad,
       GST_VIDEO_INFO_PAR_D (&vagg->info),
       &width, &height, &cpad->x_offset, &cpad->y_offset);
 
-  if (width == 0 || height == 0) {
-    GST_OBJECT_UNLOCK (vagg);
+  if (width == 0 || height == 0)
     return;
-  }
 
   frame_rect = pad_clamp_rectangle (cpad->xpos + cpad->x_offset,
       cpad->ypos + cpad->y_offset, width, height,
       GST_VIDEO_INFO_WIDTH (&vagg->info), GST_VIDEO_INFO_HEIGHT (&vagg->info));
 
   if (frame_rect.w == 0 || frame_rect.h == 0) {
-    GST_OBJECT_UNLOCK (vagg);
     GST_DEBUG_OBJECT (pad, "Resulting frame is zero-width or zero-height "
         "(w: %i, h: %i), skipping", frame_rect.w, frame_rect.h);
     return;
   }
 
   /* Check if this frame is obscured by a higher-zorder frame */
+  GST_OBJECT_LOCK (vagg);
   l = g_list_find (GST_ELEMENT (vagg)->sinkpads, pad);
   if (l)
     l = l->next;
@@ -423,4 +420,10 @@ gst_vf_metal_compositor_pad_init (GstVfMetalCompositorPad * pad)
   pad->pending_height = pad->height;
   pad->pending_alpha = pad->alpha;
   pad->pending_sizing_policy = pad->sizing_policy;
+  pad->committed_xpos = pad->xpos;
+  pad->committed_ypos = pad->ypos;
+  pad->committed_width = pad->width;
+  pad->committed_height = pad->height;
+  pad->committed_alpha = pad->alpha;
+  pad->committed_sizing_policy = pad->sizing_policy;
 }
