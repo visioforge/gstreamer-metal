@@ -50,6 +50,9 @@ typedef struct {
 
 @interface MetalCompositorRenderer : NSObject
 
+/* NO until a configure succeeds, and again after one that failed */
+@property (nonatomic, readonly) BOOL configured;
+
 - (instancetype)init;
 - (BOOL)configureWithWidth:(int)width
                     height:(int)height

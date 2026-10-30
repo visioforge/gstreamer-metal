@@ -174,6 +174,11 @@ typedef struct {
 
     id<MTLDevice> device = [VfMetalDevice sharedDevice].device;
 
+    /* Set again only once every resource is built, so a rebuild that fails
+     * halfway is retried by the next call instead of matching the check
+     * above with stale resources. */
+    _inputRGBA = nil;
+
     _width = w;
     _height = h;
     _format = fmt;
@@ -189,15 +194,16 @@ typedef struct {
                      MTLTextureUsageRenderTarget;
     rgbaDesc.storageMode = MTLStorageModeShared;
 
-    _inputRGBA = [device newTextureWithDescriptor:rgbaDesc];
+    id<MTLTexture> inputRGBA = [device newTextureWithDescriptor:rgbaDesc];
     _outputRGBA = [device newTextureWithDescriptor:rgbaDesc];
     _prevFrameRGBA = [device newTextureWithDescriptor:rgbaDesc];
-    if (!_inputRGBA || !_outputRGBA || !_prevFrameRGBA) return NO;
+    if (!inputRGBA || !_outputRGBA || !_prevFrameRGBA) return NO;
 
     if (![_yuvOutput configureWithDevice:device library:_library
                                    width:w height:h format:fmt])
         return NO;
 
+    _inputRGBA = inputRGBA;
     return YES;
 }
 

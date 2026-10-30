@@ -106,12 +106,6 @@ gst_vf_metal_video_sink_set_caps (GstBaseSink * bsink, GstCaps * caps)
   if (!gst_video_info_from_caps (&info, caps))
     return FALSE;
 
-  self->info = info;
-  self->have_info = TRUE;
-
-  GST_VIDEO_SINK_WIDTH (self) = GST_VIDEO_INFO_WIDTH (&info);
-  GST_VIDEO_SINK_HEIGHT (self) = GST_VIDEO_INFO_HEIGHT (&info);
-
   if (self->renderer) {
     @autoreleasepool {
       MetalVideoSinkRenderer *renderer =
@@ -122,6 +116,13 @@ gst_vf_metal_video_sink_set_caps (GstBaseSink * bsink, GstCaps * caps)
       }
     }
   }
+
+  /* Stored only once the renderer accepted the caps */
+  self->info = info;
+  self->have_info = TRUE;
+
+  GST_VIDEO_SINK_WIDTH (self) = GST_VIDEO_INFO_WIDTH (&info);
+  GST_VIDEO_SINK_HEIGHT (self) = GST_VIDEO_INFO_HEIGHT (&info);
 
   return TRUE;
 }
