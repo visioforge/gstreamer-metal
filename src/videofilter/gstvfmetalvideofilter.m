@@ -113,16 +113,13 @@ GST_ELEMENT_REGISTER_DEFINE (vfmetalvideofilter, "vfmetalvideofilter",
 
 #define FLOAT_EQ(a, b) (fabs((a) - (b)) < 1e-6)
 
-/* Two threads committing at once must not set passthrough in the opposite
- * order from the one they read the settings in. set_passthrough takes the
- * object lock, so the pair needs a lock of its own.
- * ponytail: one lock for every instance; per-instance if it ever contends. */
-G_LOCK_DEFINE_STATIC (passthrough);
-
 static void
 gst_vf_metal_video_filter_update_passthrough (GstVfMetalVideoFilter * self)
 {
-  G_LOCK (passthrough);
+  /* Two threads committing at once must not set passthrough in the opposite
+   * order from the one they read the settings in. set_passthrough takes the
+   * object lock, so the pair needs a lock of its own. */
+  g_mutex_lock (&self->passthrough_lock);
   GST_OBJECT_LOCK (self);
   gboolean passthrough =
       FLOAT_EQ(self->brightness, DEFAULT_BRIGHTNESS) &&
@@ -140,7 +137,7 @@ gst_vf_metal_video_filter_update_passthrough (GstVfMetalVideoFilter * self)
   GST_OBJECT_UNLOCK (self);
 
   gst_base_transform_set_passthrough (GST_BASE_TRANSFORM (self), passthrough);
-  G_UNLOCK (passthrough);
+  g_mutex_unlock (&self->passthrough_lock);
 
   GST_DEBUG_OBJECT (self, "passthrough = %s", passthrough ? "TRUE" : "FALSE");
 }
@@ -305,7 +302,8 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
    * a batch without lut-file never reads the file. */
   gboolean lut_written = FALSE;
   for (guint i = 0; i < n_pspecs; i++)
-    lut_written |= g_strcmp0 (pspecs[i]->name, "lut-file") == 0;
+    lut_written |= pspecs[i]->owner_type == GST_TYPE_VF_METAL_VIDEO_FILTER &&
+        pspecs[i]->param_id == PROP_LUT_FILE;
 
   GST_OBJECT_LOCK (self);
   gboolean reload = lut_written &&
@@ -348,10 +346,6 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
     if (renderer && (lut || clear)) {
       [renderer stageLUT:lut size:lut_size];
       self->lut_active = lut != nil;
-    } else if (!renderer) {
-      /* No Metal device: a LUT asked for fails in transform_frame, like
-       * any other effect, instead of passing video through ungraded */
-      self->lut_active = !clear;
     }
   }
   g_free (lut_file);
@@ -488,6 +482,7 @@ gst_vf_metal_video_filter_finalize (GObject * object)
   self->lut_file = NULL;
   g_free (self->pending_lut_file);
   self->pending_lut_file = NULL;
+  g_mutex_clear (&self->passthrough_lock);
 
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
@@ -670,6 +665,7 @@ gst_vf_metal_video_filter_init (GstVfMetalVideoFilter * self)
   self->lut_loaded = FALSE;
   self->lut_active = FALSE;
   self->frame_count = 0;
+  g_mutex_init (&self->passthrough_lock);
 
   @autoreleasepool {
     MetalVideoFilterRenderer *renderer =

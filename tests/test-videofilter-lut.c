@@ -154,20 +154,23 @@ main (int argc, char **argv)
   /* A path that failed is read again only when lut-file itself is written:
    * the file appears afterwards, an unrelated write leaves it unread. */
   g_object_set (h->element, "lut-file", late, NULL);
+  check_rgb ("a path that does not exist yet fails to load",
+      push_and_get_rgb (h), 0xFFFFFF);
   gchar *cube = NULL;
   gsize cube_len = 0;
-  if (!g_file_get_contents (lut, &cube, &cube_len, NULL) ||
-      !g_file_set_contents (late, cube, cube_len, NULL)) {
+  if (g_file_get_contents (lut, &cube, &cube_len, NULL) &&
+      g_file_set_contents (late, cube, cube_len, NULL)) {
+    g_object_set (h->element, "brightness", 0.2, NULL);
+    check_rgb ("an unrelated write does not retry a failed path",
+        push_and_get_rgb (h), 0xFFFFFF);
+    g_object_set (h->element, "lut-file", late, NULL);
+    check_rgb ("writing the failed path again retries it",
+        push_and_get_rgb (h), 0x000000);
+  } else {
     printf ("  FAIL  cannot write %s\n", late);
     failures++;
   }
   g_free (cube);
-  g_object_set (h->element, "brightness", 0.2, NULL);
-  check_rgb ("an unrelated write does not retry a failed path",
-      push_and_get_rgb (h), 0xFFFFFF);
-  g_object_set (h->element, "lut-file", late, NULL);
-  check_rgb ("writing the failed path again retries it",
-      push_and_get_rgb (h), 0x000000);
 
   gst_harness_teardown (h);
   g_remove (lut);

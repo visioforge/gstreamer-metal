@@ -96,6 +96,9 @@ struct _GstVfMetalVideoFilter
   /* Frame counter for noise randomization */
   guint64 frame_count;
 
+  /* Held while passthrough is computed and set */
+  GMutex passthrough_lock;
+
   /* Metal rendering engine (opaque Obj-C object, cast to MetalVideoFilterRenderer* in .m) */
   void *renderer;
 };
