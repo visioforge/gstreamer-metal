@@ -343,8 +343,8 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
       (__bridge MetalVideoFilterRenderer *)self->renderer;
 
   /* The file is read here, outside the lock; the renderer only gets the
-   * texture on the streaming thread (transform_frame), with the parameters
-   * committed below. Frames drawn while the file loads keep the old LUT and
+   * texture on the streaming thread (before_transform and transform_frame),
+   * with the parameters committed below. Frames drawn while the file loads keep the old LUT and
    * the old look. A failed load keeps the old LUT. */
   gboolean clear = !lut_file || lut_file[0] == '\0';
   id<MTLTexture> lut = nil;

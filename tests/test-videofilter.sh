@@ -233,7 +233,7 @@ if [ -d "/Library/Frameworks/GStreamer.framework" ]; then
 fi
 LUT_BIN="${BUILD_DIR}/test-videofilter-lut"
 run_test "lut-file written while streaming reaches the next buffer; passthrough follows the LUT in use" \
-    sh -c "cc -x objective-c -fobjc-arc '${SCRIPT_DIR}/test-videofilter-lut.c' -o '${LUT_BIN}' \
+    sh -c "cc -fobjc-arc '${SCRIPT_DIR}/test-videofilter-lut.m' -o '${LUT_BIN}' \
         -framework Metal \$(pkg-config --cflags --libs gstreamer-check-1.0 gstreamer-base-1.0 gstreamer-1.0) && \
         GST_REGISTRY_FORK=no '${LUT_BIN}'"
 

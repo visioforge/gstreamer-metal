@@ -118,7 +118,7 @@ main (int argc, char **argv)
       for (int r = 0; r < 2; r++)
         fprintf (f, "%d %d %d\n", 1 - r, 1 - g, 1 - b);
   fclose (f);
-  /* An identity 64^3 LUT: at least 1 MB of texture, white stays white */
+  /* An identity 64^3 LUT: 4 MB of RGBA32Float texture, white stays white */
   f = fopen (big, "w");
   if (!f) {
     printf ("  FAIL  cannot write %s\n", big);
