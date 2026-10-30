@@ -435,8 +435,7 @@ _fixate_caps (GstAggregator * agg, GstCaps * caps)
   /* Negotiation runs before the first aggregate, and the output size
    * follows the pads' rectangles: take the batches written so far */
   GST_OBJECT_LOCK (vagg);
-  for (l = GST_ELEMENT (vagg)->sinkpads; l; l = l->next)
-    gst_vf_metal_compositor_pad_snapshot (l->data);
+  gst_vf_metal_compositor_snapshot_pads (GST_ELEMENT (vagg));
   for (l = GST_ELEMENT (vagg)->sinkpads; l; l = l->next) {
     GstVideoAggregatorPad *vaggpad = l->data;
     GstVfMetalCompositorPad *cpad = GST_VF_METAL_COMPOSITOR_PAD (vaggpad);
@@ -668,18 +667,15 @@ gst_vf_metal_compositor_stop (GstAggregator * agg)
 
 /* --- Per-frame snapshot --- */
 
-/* One snapshot of every pad's last committed batch per output frame:
+/* One snapshot of every pad's last committed batch per output frame, so
  * prepare_frame_start, the background check and aggregate_frames all read
- * the same rectangles, even when a batch commits while the frame is built */
+ * the same rectangles even when a batch commits while the frame is built.
+ * The snapshot itself waits for the first prepare_frame_start: the parent
+ * syncs controlled properties after this and before that */
 static GstFlowReturn
 gst_vf_metal_compositor_aggregate (GstAggregator * agg, gboolean timeout)
 {
-  GList *l;
-
-  GST_OBJECT_LOCK (agg);
-  for (l = GST_ELEMENT (agg)->sinkpads; l; l = l->next)
-    gst_vf_metal_compositor_pad_snapshot (l->data);
-  GST_OBJECT_UNLOCK (agg);
+  GST_VF_METAL_COMPOSITOR (agg)->snapshot_pending = TRUE;
 
   return GST_AGGREGATOR_CLASS (parent_class)->aggregate (agg, timeout);
 }

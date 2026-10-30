@@ -92,6 +92,10 @@ struct _GstVfMetalCompositor
 
   /* Metal rendering engine (opaque Obj-C object, cast to MetalCompositorRenderer* in .m) */
   void *renderer;
+
+  /* Set by each aggregate; the first prepare_frame_start of the frame
+   * clears it and snapshots every pad. Aggregator thread only */
+  gboolean snapshot_pending;
 };
 
 /**
@@ -99,6 +103,15 @@ struct _GstVfMetalCompositor
  *
  * Pad for the Metal compositor.
  */
+/* The batched pad properties */
+typedef struct
+{
+  gint xpos, ypos;
+  gint width, height;
+  gdouble alpha;
+  GstVfMetalCompositorSizingPolicy sizing_policy;
+} GstVfMetalCompositorPadBatch;
+
 struct _GstVfMetalCompositorPad
 {
   GstVideoAggregatorPad parent;
@@ -112,18 +125,12 @@ struct _GstVfMetalCompositorPad
   GstVfMetalCompositorOperator op;
 
   /* What set_property wrote. dispatch_properties_changed copies it to
-   * committed_* as one batch, and every output frame starts by copying
-   * committed_* to the fields above (gst_vf_metal_compositor_pad_snapshot),
-   * so one frame reads one batch throughout. zorder and operator are not
-   * batched: they apply at the write */
-  gint pending_xpos, pending_ypos;
-  gint pending_width, pending_height;
-  gdouble pending_alpha;
-  GstVfMetalCompositorSizingPolicy pending_sizing_policy;
-  gint committed_xpos, committed_ypos;
-  gint committed_width, committed_height;
-  gdouble committed_alpha;
-  GstVfMetalCompositorSizingPolicy committed_sizing_policy;
+   * committed as one batch, and each output frame copies committed to the
+   * fields above once, after the controller sync
+   * (gst_vf_metal_compositor_snapshot_pads), so one frame reads one batch
+   * throughout. zorder and operator are not batched: they apply at the
+   * write */
+  GstVfMetalCompositorPadBatch pending, committed;
 
   /* Computed offsets for keep-aspect-ratio */
   gint x_offset;
@@ -132,8 +139,9 @@ struct _GstVfMetalCompositorPad
 
 GST_ELEMENT_REGISTER_DECLARE (vfmetalcompositor);
 
-/* Call with the element's object lock held, on the aggregator thread */
-void gst_vf_metal_compositor_pad_snapshot (GstVfMetalCompositorPad * pad);
+/* Copies every sink pad's committed batch to the fields the frame reads.
+ * Call with the element's object lock held, on the aggregator thread */
+void gst_vf_metal_compositor_snapshot_pads (GstElement * element);
 
 static inline gint
 pad_zorder_compare (const GstVfMetalCompositorPad * pad1,

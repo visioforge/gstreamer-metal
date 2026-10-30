@@ -206,7 +206,7 @@ fi
 BATCH_BIN="${BUILD_DIR}/test-compositor-batch"
 run_test "a frame between two writes of a batch keeps the rectangle" \
     sh -c "cc '${SCRIPT_DIR}/test-compositor-batch.c' -o '${BATCH_BIN}' \
-        \$(pkg-config --cflags --libs gstreamer-check-1.0 gstreamer-base-1.0 gstreamer-1.0) && \
+        \$(pkg-config --cflags --libs gstreamer-check-1.0 gstreamer-controller-1.0 gstreamer-base-1.0 gstreamer-1.0) && \
         GST_REGISTRY_FORK=no '${BATCH_BIN}'"
 
 # --- Summary ---

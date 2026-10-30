@@ -78,25 +78,25 @@ gst_vf_metal_compositor_pad_get_property (GObject * object, guint prop_id,
   GST_OBJECT_LOCK (pad);
   switch (prop_id) {
     case PROP_PAD_XPOS:
-      g_value_set_int (value, pad->pending_xpos);
+      g_value_set_int (value, pad->pending.xpos);
       break;
     case PROP_PAD_YPOS:
-      g_value_set_int (value, pad->pending_ypos);
+      g_value_set_int (value, pad->pending.ypos);
       break;
     case PROP_PAD_WIDTH:
-      g_value_set_int (value, pad->pending_width);
+      g_value_set_int (value, pad->pending.width);
       break;
     case PROP_PAD_HEIGHT:
-      g_value_set_int (value, pad->pending_height);
+      g_value_set_int (value, pad->pending.height);
       break;
     case PROP_PAD_ALPHA:
-      g_value_set_double (value, pad->pending_alpha);
+      g_value_set_double (value, pad->pending.alpha);
       break;
     case PROP_PAD_OPERATOR:
       g_value_set_enum (value, pad->op);
       break;
     case PROP_PAD_SIZING_POLICY:
-      g_value_set_enum (value, pad->pending_sizing_policy);
+      g_value_set_enum (value, pad->pending.sizing_policy);
       break;
     case PROP_PAD_ZORDER:
       g_value_set_uint (value, pad->zorder);
@@ -114,32 +114,32 @@ gst_vf_metal_compositor_pad_set_property (GObject * object, guint prop_id,
 {
   GstVfMetalCompositorPad *pad = GST_VF_METAL_COMPOSITOR_PAD (object);
 
-  /* The rectangle and alpha go to pending_*; dispatch_properties_changed
+  /* The rectangle and alpha go to pending; dispatch_properties_changed
    * commits them with the rest of the batch */
   switch (prop_id) {
     case PROP_PAD_XPOS:
       GST_OBJECT_LOCK (pad);
-      pad->pending_xpos = g_value_get_int (value);
+      pad->pending.xpos = g_value_get_int (value);
       GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_YPOS:
       GST_OBJECT_LOCK (pad);
-      pad->pending_ypos = g_value_get_int (value);
+      pad->pending.ypos = g_value_get_int (value);
       GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_WIDTH:
       GST_OBJECT_LOCK (pad);
-      pad->pending_width = g_value_get_int (value);
+      pad->pending.width = g_value_get_int (value);
       GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_HEIGHT:
       GST_OBJECT_LOCK (pad);
-      pad->pending_height = g_value_get_int (value);
+      pad->pending.height = g_value_get_int (value);
       GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_ALPHA:
       GST_OBJECT_LOCK (pad);
-      pad->pending_alpha = g_value_get_double (value);
+      pad->pending.alpha = g_value_get_double (value);
       GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_OPERATOR:
@@ -149,7 +149,7 @@ gst_vf_metal_compositor_pad_set_property (GObject * object, guint prop_id,
       break;
     case PROP_PAD_SIZING_POLICY:
       GST_OBJECT_LOCK (pad);
-      pad->pending_sizing_policy = g_value_get_enum (value);
+      pad->pending.sizing_policy = g_value_get_enum (value);
       GST_OBJECT_UNLOCK (pad);
       break;
     case PROP_PAD_ZORDER:
@@ -204,12 +204,7 @@ gst_vf_metal_compositor_pad_dispatch_properties_changed (GObject * object,
 
   if (batched) {
     GST_OBJECT_LOCK (pad);
-    pad->committed_xpos = pad->pending_xpos;
-    pad->committed_ypos = pad->pending_ypos;
-    pad->committed_width = pad->pending_width;
-    pad->committed_height = pad->pending_height;
-    pad->committed_alpha = pad->pending_alpha;
-    pad->committed_sizing_policy = pad->pending_sizing_policy;
+    pad->committed = pad->pending;
     GST_OBJECT_UNLOCK (pad);
   }
 
@@ -218,17 +213,21 @@ gst_vf_metal_compositor_pad_dispatch_properties_changed (GObject * object,
 }
 
 void
-gst_vf_metal_compositor_pad_snapshot (GstVfMetalCompositorPad * pad)
+gst_vf_metal_compositor_snapshot_pads (GstElement * element)
 {
   /* Element lock (held by the caller), then pad lock */
-  GST_OBJECT_LOCK (pad);
-  pad->xpos = pad->committed_xpos;
-  pad->ypos = pad->committed_ypos;
-  pad->width = pad->committed_width;
-  pad->height = pad->committed_height;
-  pad->alpha = pad->committed_alpha;
-  pad->sizing_policy = pad->committed_sizing_policy;
-  GST_OBJECT_UNLOCK (pad);
+  for (GList * l = element->sinkpads; l; l = l->next) {
+    GstVfMetalCompositorPad *pad = l->data;
+
+    GST_OBJECT_LOCK (pad);
+    pad->xpos = pad->committed.xpos;
+    pad->ypos = pad->committed.ypos;
+    pad->width = pad->committed.width;
+    pad->height = pad->committed.height;
+    pad->alpha = pad->committed.alpha;
+    pad->sizing_policy = pad->committed.sizing_policy;
+    GST_OBJECT_UNLOCK (pad);
+  }
 }
 
 /* --- prepare_frame_start --- */
@@ -259,10 +258,21 @@ gst_vf_metal_compositor_pad_prepare_frame_start (GstVideoAggregatorPad * pad,
     GstVideoFrame * prepared_frame)
 {
   GstVfMetalCompositorPad *cpad = GST_VF_METAL_COMPOSITOR_PAD (pad);
+  GstVfMetalCompositor *comp = GST_VF_METAL_COMPOSITOR (vagg);
   gint width, height;
   gboolean frame_obscured = FALSE;
   GList *l;
   GstVideoRectangle frame_rect;
+
+  /* The first pad of the frame snapshots them all: after the controller
+   * sync, before any rectangle of this frame is read. A frame where no pad
+   * gets here reads no rectangle either */
+  if (comp->snapshot_pending) {
+    comp->snapshot_pending = FALSE;
+    GST_OBJECT_LOCK (vagg);
+    gst_vf_metal_compositor_snapshot_pads (GST_ELEMENT (vagg));
+    GST_OBJECT_UNLOCK (vagg);
+  }
 
   /* Skip if fully transparent */
   if (cpad->alpha == 0.0) {
@@ -414,16 +424,11 @@ gst_vf_metal_compositor_pad_init (GstVfMetalCompositorPad * pad)
   pad->height = DEFAULT_PAD_HEIGHT;
   pad->sizing_policy = DEFAULT_PAD_SIZING_POLICY;
   pad->zorder = DEFAULT_PAD_ZORDER;
-  pad->pending_xpos = pad->xpos;
-  pad->pending_ypos = pad->ypos;
-  pad->pending_width = pad->width;
-  pad->pending_height = pad->height;
-  pad->pending_alpha = pad->alpha;
-  pad->pending_sizing_policy = pad->sizing_policy;
-  pad->committed_xpos = pad->xpos;
-  pad->committed_ypos = pad->ypos;
-  pad->committed_width = pad->width;
-  pad->committed_height = pad->height;
-  pad->committed_alpha = pad->alpha;
-  pad->committed_sizing_policy = pad->sizing_policy;
+  pad->pending.xpos = pad->xpos;
+  pad->pending.ypos = pad->ypos;
+  pad->pending.width = pad->width;
+  pad->pending.height = pad->height;
+  pad->pending.alpha = pad->alpha;
+  pad->pending.sizing_policy = pad->sizing_policy;
+  pad->committed = pad->pending;
 }

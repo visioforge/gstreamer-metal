@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <gst/gst.h>
 #include <gst/check/gstharness.h>
+#include <gst/controller/gstinterpolationcontrolsource.h>
+#include <gst/controller/gstdirectcontrolbinding.h>
 
 #define W 64
 #define H 64
@@ -146,6 +148,23 @@ main (int argc, char **argv)
     printf ("  FAIL  read-back in a batch: xpos %d, expected 20\n", xpos);
     failures++;
   }
+  out = push_red (h);
+  check ("after the read-back batch", out, 22, 40, TRUE);
+  check ("after the read-back batch", out, 8, 40, FALSE);
+  gst_clear_buffer (&out);
+
+  /* A controlled alpha is drawn on the frame it was synced for: the
+   * controller writes after the frame starts, before any rectangle is read. */
+  GstControlSource *cs = gst_interpolation_control_source_new ();
+  g_object_set (cs, "mode", GST_INTERPOLATION_MODE_NONE, NULL);
+  gst_timed_value_control_source_set (GST_TIMED_VALUE_CONTROL_SOURCE (cs), 0,
+      0.5);
+  gst_object_add_control_binding (GST_OBJECT (pad),
+      gst_direct_control_binding_new_absolute (GST_OBJECT (pad), "alpha", cs));
+  gst_object_unref (cs);
+  out = push_red (h);
+  check_level ("controlled alpha", out, 22, 40, 100, 160);
+  gst_clear_buffer (&out);
 
   gst_harness_teardown (h);
   return failures == 0 ? 0 : 1;
