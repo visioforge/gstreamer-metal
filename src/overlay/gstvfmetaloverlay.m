@@ -93,10 +93,17 @@ GST_ELEMENT_REGISTER_DEFINE (vfmetaloverlay, "vfmetaloverlay",
 static void
 gst_vf_metal_overlay_update_passthrough (GstVfMetalOverlay * self)
 {
+  /* Two threads committing at once must not set passthrough in the opposite
+   * order from the one they read image_loaded in. set_passthrough takes the
+   * object lock, so the pair needs a lock of its own. */
+  g_mutex_lock (&self->passthrough_lock);
+  GST_OBJECT_LOCK (self);
   gboolean passthrough = !self->image_loaded;
+  GST_OBJECT_UNLOCK (self);
 
   gst_base_transform_set_passthrough (GST_BASE_TRANSFORM (self), passthrough);
   GST_DEBUG_OBJECT (self, "passthrough = %s", passthrough ? "TRUE" : "FALSE");
+  g_mutex_unlock (&self->passthrough_lock);
 }
 
 /* --- Load overlay image --- */
@@ -107,24 +114,25 @@ gst_vf_metal_overlay_load_image (GstVfMetalOverlay * self)
   if (!self->renderer)
     return;
 
+  gboolean loaded = FALSE;
   @autoreleasepool {
     MetalOverlayRenderer *renderer =
         (__bridge MetalOverlayRenderer *)self->renderer;
 
     if (!self->location || *self->location == '\0') {
       [renderer clearImage];
-      self->image_loaded = FALSE;
+    } else if ([renderer loadImageFromFile:self->location]) {
+      loaded = TRUE;
+      GST_INFO_OBJECT (self, "Loaded overlay image: %s", self->location);
     } else {
-      if ([renderer loadImageFromFile:self->location]) {
-        self->image_loaded = TRUE;
-        GST_INFO_OBJECT (self, "Loaded overlay image: %s", self->location);
-      } else {
-        self->image_loaded = FALSE;
-        GST_WARNING_OBJECT (self, "Failed to load overlay image: %s",
-            self->location);
-      }
+      GST_WARNING_OBJECT (self, "Failed to load overlay image: %s",
+          self->location);
     }
   }
+
+  GST_OBJECT_LOCK (self);
+  self->image_loaded = loaded;
+  GST_OBJECT_UNLOCK (self);
 
   gst_vf_metal_overlay_update_passthrough (self);
 }
@@ -264,13 +272,19 @@ gst_vf_metal_overlay_dispatch_properties_changed (GObject * object,
 {
   GstVfMetalOverlay *self = GST_VF_METAL_OVERLAY (object);
 
-  /* A new path, or the same one after a load that failed: (re)load it. The
-   * same path loaded already is not read again. */
+  /* A location write with a new path, or the same one after a load that
+   * failed: (re)load it. The same path loaded already is not read again, and
+   * a batch without location never reads the file. */
+  gboolean location_written = FALSE;
+  for (guint i = 0; i < n_pspecs; i++)
+    location_written |= pspecs[i]->owner_type == GST_TYPE_VF_METAL_OVERLAY &&
+        pspecs[i]->param_id == PROP_LOCATION;
+
   GST_OBJECT_LOCK (self);
-  gboolean reload =
-      g_strcmp0 (self->location, self->pending_location) != 0 ||
+  gboolean reload = location_written &&
+      (g_strcmp0 (self->location, self->pending_location) != 0 ||
       (!self->image_loaded && self->pending_location &&
-      *self->pending_location != '\0');
+      *self->pending_location != '\0'));
   if (reload) {
     g_free (self->location);
     self->location = g_strdup (self->pending_location);
@@ -375,6 +389,7 @@ gst_vf_metal_overlay_finalize (GObject * object)
   self->location = NULL;
   g_free (self->pending_location);
   self->pending_location = NULL;
+  g_mutex_clear (&self->passthrough_lock);
 
   if (self->renderer) {
     @autoreleasepool {
@@ -498,6 +513,7 @@ gst_vf_metal_overlay_init (GstVfMetalOverlay * self)
   self->pending_relative_x = DEFAULT_RELATIVE;
   self->pending_relative_y = DEFAULT_RELATIVE;
   self->image_loaded = FALSE;
+  g_mutex_init (&self->passthrough_lock);
 
   @autoreleasepool {
     MetalOverlayRenderer *renderer =

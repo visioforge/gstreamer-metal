@@ -8,11 +8,13 @@
  * exist yet. Exit code 0 means every check passed.
  *
  * Also: the image survives a restart (READY and back), and a location whose
- * load failed is loaded again when it is written again. */
+ * load failed is loaded again when it is written again. A failed path is not
+ * read again when some other property is written (MediaFrameworkDotnet#3552). */
 
 #include <stdio.h>
 #include <gst/gst.h>
 #include <gst/check/gstharness.h>
+#include <gst/base/gstbasetransform.h>
 #include <glib/gstdio.h>
 
 #define W 64
@@ -37,6 +39,20 @@ is_red (GstBuffer * buf, int x, int y)
   guint8 px[4];
   gst_buffer_extract (buf, (y * W + x) * 4, px, 4);
   return px[2] > 200 && px[0] < 50 && px[1] < 50;
+}
+
+static void
+check_passthrough (const char *what, GstHarness * h, gboolean expected)
+{
+  gboolean actual = gst_base_transform_is_passthrough (
+      GST_BASE_TRANSFORM (h->element));
+  if (actual == expected) {
+    printf ("  PASS  %s: passthrough %s\n", what, actual ? "on" : "off");
+  } else {
+    printf ("  FAIL  %s: passthrough %s, expected %s\n", what,
+        actual ? "on" : "off", expected ? "on" : "off");
+    failures++;
+  }
 }
 
 static void
@@ -103,10 +119,12 @@ main (int argc, char **argv)
   check ("after a restart", out, 8, 40, TRUE);
   gst_clear_buffer (&out);
 
-  /* A location that failed to load is tried again when written again. */
+  /* A location that failed to load is tried again when written again.
+   * An unrelated write does not retry it, even after the file appears. */
   g_object_set (h->element, "location", argv[2], NULL);
   out = push_black (h);
   check ("missing file", out, 8, 40, FALSE);
+  check_passthrough ("missing file", h, TRUE);
   gst_clear_buffer (&out);
   gchar *png = NULL;
   gsize len = 0;
@@ -116,9 +134,17 @@ main (int argc, char **argv)
     failures++;
   }
   g_free (png);
+  /* alpha is already 1. A retry would paint the red image; an ignored
+   * write leaves the frame black. */
+  g_object_set (h->element, "alpha", 1.0, NULL);
+  out = push_black (h);
+  check ("an unrelated write does not retry a failed path", out, 8, 40, FALSE);
+  check_passthrough ("an unrelated write does not retry a failed path", h, TRUE);
+  gst_clear_buffer (&out);
   g_object_set (h->element, "location", argv[2], NULL);
   out = push_black (h);
   check ("the same location once the file exists", out, 8, 40, TRUE);
+  check_passthrough ("the same location once the file exists", h, FALSE);
   gst_clear_buffer (&out);
   g_unlink (argv[2]);
 
