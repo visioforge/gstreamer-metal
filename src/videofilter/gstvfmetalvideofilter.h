@@ -90,7 +90,8 @@ struct _GstVfMetalVideoFilter
   gchar *lut_file;          /* path to .cube or .png LUT file */
   gboolean lut_loaded;      /* lut_file was read into the renderer */
   guint lut_load;           /* counts reloads; the newest one is staged */
-  gboolean lut_active;      /* a LUT texture is staged or installed */
+  gboolean lut_active;      /* the newest staged LUT (or the installed one,
+                               if none is staged) is non-nil */
 
   /* Frame counter for noise randomization */
   guint64 frame_count;

@@ -113,9 +113,16 @@ GST_ELEMENT_REGISTER_DEFINE (vfmetalvideofilter, "vfmetalvideofilter",
 
 #define FLOAT_EQ(a, b) (fabs((a) - (b)) < 1e-6)
 
+/* Two threads committing at once must not set passthrough in the opposite
+ * order from the one they read the settings in. set_passthrough takes the
+ * object lock, so the pair needs a lock of its own.
+ * ponytail: one lock for every instance; per-instance if it ever contends. */
+G_LOCK_DEFINE_STATIC (passthrough);
+
 static void
 gst_vf_metal_video_filter_update_passthrough (GstVfMetalVideoFilter * self)
 {
+  G_LOCK (passthrough);
   GST_OBJECT_LOCK (self);
   gboolean passthrough =
       FLOAT_EQ(self->brightness, DEFAULT_BRIGHTNESS) &&
@@ -133,6 +140,7 @@ gst_vf_metal_video_filter_update_passthrough (GstVfMetalVideoFilter * self)
   GST_OBJECT_UNLOCK (self);
 
   gst_base_transform_set_passthrough (GST_BASE_TRANSFORM (self), passthrough);
+  G_UNLOCK (passthrough);
 
   GST_DEBUG_OBJECT (self, "passthrough = %s", passthrough ? "TRUE" : "FALSE");
 }
@@ -335,6 +343,10 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
     if (renderer && (lut || clear)) {
       [renderer stageLUT:lut size:lut_size];
       self->lut_active = lut != nil;
+    } else if (!renderer) {
+      /* No Metal device: a LUT asked for fails in transform_frame, like
+       * any other effect, instead of passing video through ungraded */
+      self->lut_active = !clear;
     }
   }
   g_free (lut_file);

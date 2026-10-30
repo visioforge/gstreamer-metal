@@ -138,6 +138,15 @@ main (int argc, char **argv)
   g_object_set (h->element, "lut-file", "", NULL);
   check_passthrough ("LUT cleared", h, TRUE);
 
+  g_object_set (h->element, "lut-file", missing, NULL);
+  check_passthrough ("a LUT that fails to load after a clear", h, TRUE);
+
+  /* The clear was staged while in passthrough; the first rendered frame
+   * applies it before drawing. brightness leaves white white. */
+  g_object_set (h->element, "brightness", 0.1, NULL);
+  check_passthrough ("brightness set", h, FALSE);
+  check_rgb ("the staged clear is applied", push_and_get_rgb (h), 0xFFFFFF);
+
   gst_harness_teardown (h);
   g_remove (lut);
   g_free (lut);

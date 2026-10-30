@@ -232,7 +232,7 @@ if [ -d "/Library/Frameworks/GStreamer.framework" ]; then
     export PKG_CONFIG_PATH="/Library/Frameworks/GStreamer.framework/Libraries/pkgconfig:${PKG_CONFIG_PATH:-}"
 fi
 LUT_BIN="${BUILD_DIR}/test-videofilter-lut"
-run_test "lut-file written while streaming reaches the next buffer" \
+run_test "lut-file written while streaming reaches the next buffer; passthrough follows the LUT in use" \
     sh -c "cc '${SCRIPT_DIR}/test-videofilter-lut.c' -o '${LUT_BIN}' \
         \$(pkg-config --cflags --libs gstreamer-check-1.0 gstreamer-base-1.0 gstreamer-1.0) && \
         GST_REGISTRY_FORK=no '${LUT_BIN}'"
