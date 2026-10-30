@@ -9,6 +9,10 @@
  * leaves white white), so every frame goes through the renderer. Exit code
  * 0 means every check passed.
  *
+ * With every other property at its default, passthrough follows the LUT in
+ * use, not the path: a path that fails to load leaves the element in
+ * passthrough (#3520), and one that fails after a good LUT keeps it out.
+ *
  * GstHarness pushes on the calling thread, so this proves the LUT reaches
  * the renderer, not that the old cross-thread race is gone: that race is not
  * reproducible deterministically. */
@@ -16,6 +20,7 @@
 #include <stdio.h>
 #include <gst/gst.h>
 #include <gst/check/gstharness.h>
+#include <gst/base/gstbasetransform.h>
 #include <glib/gstdio.h>
 #include <unistd.h>
 
@@ -53,6 +58,20 @@ check_rgb (const char *what, gint actual, gint expected)
     printf ("  PASS  %s: 0x%06X\n", what, actual);
   } else {
     printf ("  FAIL  %s: 0x%06X, expected 0x%06X\n", what, actual, expected);
+    failures++;
+  }
+}
+
+static void
+check_passthrough (const char *what, GstHarness * h, gboolean expected)
+{
+  gboolean actual = gst_base_transform_is_passthrough (
+      GST_BASE_TRANSFORM (h->element));
+  if (actual == expected) {
+    printf ("  PASS  %s: passthrough %s\n", what, actual ? "on" : "off");
+  } else {
+    printf ("  FAIL  %s: passthrough %s, expected %s\n", what,
+        actual ? "on" : "off", expected ? "on" : "off");
     failures++;
   }
 }
@@ -97,6 +116,27 @@ main (int argc, char **argv)
 
   g_object_set (h->element, "lut-file", "", NULL);
   check_rgb ("LUT cleared while streaming", push_and_get_rgb (h), 0xFFFFFF);
+
+  gst_harness_teardown (h);
+
+  /* Every other property at its default: only the LUT can leave passthrough */
+  h = gst_harness_new ("vfmetalvideofilter");
+  gst_harness_set_src_caps_str (h,
+      "video/x-raw,format=BGRA,width=64,height=64,framerate=30/1");
+
+  g_object_set (h->element, "lut-file", missing, NULL);
+  check_passthrough ("a LUT that fails to load, none before", h, TRUE);
+
+  g_object_set (h->element, "lut-file", lut, NULL);
+  check_passthrough ("LUT loaded", h, FALSE);
+  check_rgb ("LUT loaded, defaults", push_and_get_rgb (h), 0x000000);
+
+  g_object_set (h->element, "lut-file", missing, NULL);
+  check_passthrough ("a LUT that fails to load after a good one", h, FALSE);
+  check_rgb ("the old LUT stays, defaults", push_and_get_rgb (h), 0x000000);
+
+  g_object_set (h->element, "lut-file", "", NULL);
+  check_passthrough ("LUT cleared", h, TRUE);
 
   gst_harness_teardown (h);
   g_remove (lut);

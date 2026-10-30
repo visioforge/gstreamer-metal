@@ -234,7 +234,7 @@ fi
 LUT_BIN="${BUILD_DIR}/test-videofilter-lut"
 run_test "lut-file written while streaming reaches the next buffer" \
     sh -c "cc '${SCRIPT_DIR}/test-videofilter-lut.c' -o '${LUT_BIN}' \
-        \$(pkg-config --cflags --libs gstreamer-check-1.0 gstreamer-1.0) && \
+        \$(pkg-config --cflags --libs gstreamer-check-1.0 gstreamer-base-1.0 gstreamer-1.0) && \
         GST_REGISTRY_FORK=no '${LUT_BIN}'"
 
 # --- Summary ---

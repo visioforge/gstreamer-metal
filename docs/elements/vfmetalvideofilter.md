@@ -103,7 +103,7 @@ gst-launch-1.0 videotestsrc ! video/x-raw,format=BGRA,width=640,height=480 ! \
 - The 3D LUT supports both `.cube` (Resolve/Adobe) and `.png` (strip) formats
 - Setting `lut-file` to null or empty string clears the LUT
 - Writing the `lut-file` it already has does not reload the file once it loaded (a load that failed is retried); to pick up a file replaced under the same path, set another path (or an empty string) first. The loaded file survives a stop and restart of the element
-- Passthrough is re-evaluated whenever any property changes
+- Passthrough is re-evaluated whenever any property changes. A `lut-file` that fails to load does not leave passthrough; a LUT already in use stays, and keeps the element out of it
 - Properties written in one `g_object_set ()` call, or between `g_object_freeze_notify ()` and `g_object_thaw_notify ()`, take effect together: no buffer sees some of them applied and others not
 - Classification: `Filter/Effect/Video`
 - Rank: `GST_RANK_NONE`

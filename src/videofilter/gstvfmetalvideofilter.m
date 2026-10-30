@@ -129,7 +129,7 @@ gst_vf_metal_video_filter_update_passthrough (GstVfMetalVideoFilter * self)
       FLOAT_EQ(self->noise, DEFAULT_NOISE) &&
       FLOAT_EQ(self->vignette, DEFAULT_VIGNETTE) &&
       (!self->chroma_key_enabled) &&
-      (self->lut_file == NULL || self->lut_file[0] == '\0');
+      !self->lut_active;
   GST_OBJECT_UNLOCK (self);
 
   gst_base_transform_set_passthrough (GST_BASE_TRANSFORM (self), passthrough);
@@ -332,8 +332,10 @@ gst_vf_metal_video_filter_dispatch_properties_changed (GObject * object,
   /* A reload started while this file loaded wins, even for the same path */
   if (reload && lut_load == self->lut_load) {
     self->lut_loaded = lut != nil;
-    if (renderer && (lut || clear))
+    if (renderer && (lut || clear)) {
       [renderer stageLUT:lut size:lut_size];
+      self->lut_active = lut != nil;
+    }
   }
   g_free (lut_file);
   self->brightness = self->pending_brightness;
@@ -649,6 +651,7 @@ gst_vf_metal_video_filter_init (GstVfMetalVideoFilter * self)
   self->pending_chroma_key_smoothness = self->chroma_key_smoothness;
   self->pending_lut_file = NULL;
   self->lut_loaded = FALSE;
+  self->lut_active = FALSE;
   self->frame_count = 0;
 
   @autoreleasepool {
