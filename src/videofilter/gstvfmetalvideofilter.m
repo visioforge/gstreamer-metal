@@ -168,6 +168,26 @@ gst_vf_metal_video_filter_set_info (GstVideoFilter * filter,
   return TRUE;
 }
 
+/* --- before_transform --- */
+
+/* basetransform calls this for every buffer, in passthrough too, where
+ * transform_frame does not run: install a staged LUT here as well, so a
+ * clear that turned passthrough on drops the old texture now rather than
+ * when an effect next leaves passthrough. Same thread as transform_frame. */
+static void
+gst_vf_metal_video_filter_before_transform (GstBaseTransform * trans,
+    GstBuffer * buffer)
+{
+  GstVfMetalVideoFilter *self = GST_VF_METAL_VIDEO_FILTER (trans);
+
+  if (!self->renderer)
+    return;
+
+  GST_OBJECT_LOCK (self);
+  [(__bridge MetalVideoFilterRenderer *)self->renderer applyStagedLUT];
+  GST_OBJECT_UNLOCK (self);
+}
+
 /* --- transform_frame --- */
 
 static GstFlowReturn
@@ -493,6 +513,7 @@ gst_vf_metal_video_filter_class_init (GstVfMetalVideoFilterClass * klass)
 {
   GObjectClass *gobject_class = (GObjectClass *) klass;
   GstElementClass *gstelement_class = (GstElementClass *) klass;
+  GstBaseTransformClass *basetransform_class = (GstBaseTransformClass *) klass;
   GstVideoFilterClass *gstvideofilter_class = (GstVideoFilterClass *) klass;
 
   gobject_class->set_property = gst_vf_metal_video_filter_set_property;
@@ -503,6 +524,9 @@ gst_vf_metal_video_filter_class_init (GstVfMetalVideoFilterClass * klass)
 
   gstelement_class->change_state =
       GST_DEBUG_FUNCPTR (gst_vf_metal_video_filter_change_state);
+
+  basetransform_class->before_transform =
+      GST_DEBUG_FUNCPTR (gst_vf_metal_video_filter_before_transform);
 
   gstvideofilter_class->set_info =
       GST_DEBUG_FUNCPTR (gst_vf_metal_video_filter_set_info);

@@ -15,7 +15,10 @@
  *
  * GstHarness pushes on the calling thread, so this proves the LUT reaches
  * the renderer, not that the old cross-thread race is gone: that race is not
- * reproducible deterministically. */
+ * reproducible deterministically.
+ *
+ * A clear that turns passthrough on releases the old LUT texture with the
+ * next buffer, although no frame is rendered (measured as GPU memory). */
 
 #include <stdio.h>
 #include <gst/gst.h>
@@ -23,6 +26,7 @@
 #include <gst/base/gstbasetransform.h>
 #include <glib/gstdio.h>
 #include <unistd.h>
+#import <Metal/Metal.h>
 
 #define W 64
 #define H 64
@@ -62,6 +66,16 @@ check_rgb (const char *what, gint actual, gint expected)
   }
 }
 
+/* Bytes allocated on every Metal device: the element picks one itself */
+static guint64
+gpu_bytes (void)
+{
+  guint64 total = 0;
+  for (id<MTLDevice> dev in MTLCopyAllDevices ())
+    total += dev.currentAllocatedSize;
+  return total;
+}
+
 static void
 check_passthrough (const char *what, GstHarness * h, gboolean expected)
 {
@@ -87,6 +101,9 @@ main (int argc, char **argv)
   name = g_strdup_printf ("vfmetal-missing-%d.cube", (int) getpid ());
   gchar *missing = g_build_filename (g_get_tmp_dir (), name, NULL);
   g_free (name);
+  name = g_strdup_printf ("vfmetal-big-%d.cube", (int) getpid ());
+  gchar *big = g_build_filename (g_get_tmp_dir (), name, NULL);
+  g_free (name);
   name = g_strdup_printf ("vfmetal-late-%d.cube", (int) getpid ());
   gchar *late = g_build_filename (g_get_tmp_dir (), name, NULL);
   g_free (name);
@@ -100,6 +117,18 @@ main (int argc, char **argv)
     for (int g = 0; g < 2; g++)
       for (int r = 0; r < 2; r++)
         fprintf (f, "%d %d %d\n", 1 - r, 1 - g, 1 - b);
+  fclose (f);
+  /* An identity 64^3 LUT: at least 1 MB of texture, white stays white */
+  f = fopen (big, "w");
+  if (!f) {
+    printf ("  FAIL  cannot write %s\n", big);
+    return 1;
+  }
+  fprintf (f, "LUT_3D_SIZE 64\n");
+  for (int b = 0; b < 64; b++)
+    for (int g = 0; g < 64; g++)
+      for (int r = 0; r < 64; r++)
+        fprintf (f, "%f %f %f\n", r / 63.0, g / 63.0, b / 63.0);
   fclose (f);
   g_remove (missing);
   g_remove (late);
@@ -175,7 +204,32 @@ main (int argc, char **argv)
   g_free (cube);
 
   gst_harness_teardown (h);
+
+  /* A clear that turns passthrough on drops the texture with the next
+   * buffer; transform_frame no longer runs to install the staged clear. */
+  h = gst_harness_new ("vfmetalvideofilter");
+  gst_harness_set_src_caps_str (h,
+      "video/x-raw,format=BGRA,width=64,height=64,framerate=30/1");
+  g_object_set (h->element, "lut-file", big, NULL);
+  check_rgb ("big LUT loaded", push_and_get_rgb (h), 0xFFFFFF);
+  guint64 with_lut = gpu_bytes ();
+  g_object_set (h->element, "lut-file", "", NULL);
+  check_passthrough ("big LUT cleared", h, TRUE);
+  check_rgb ("passthrough after the clear", push_and_get_rgb (h), 0xFFFFFF);
+  guint64 cleared = gpu_bytes ();
+  if (cleared + 512 * 1024 <= with_lut) {
+    printf ("  PASS  the cleared LUT texture is released: %llu -> %llu bytes\n",
+        (unsigned long long) with_lut, (unsigned long long) cleared);
+  } else {
+    printf ("  FAIL  the cleared LUT texture is kept: %llu -> %llu bytes\n",
+        (unsigned long long) with_lut, (unsigned long long) cleared);
+    failures++;
+  }
+  gst_harness_teardown (h);
+
   g_remove (lut);
+  g_remove (big);
+  g_free (big);
   g_remove (late);
   g_free (lut);
   g_free (missing);
