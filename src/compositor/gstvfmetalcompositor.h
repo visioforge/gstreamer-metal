@@ -98,11 +98,6 @@ struct _GstVfMetalCompositor
   gboolean snapshot_pending;
 };
 
-/**
- * GstVfMetalCompositorPad:
- *
- * Pad for the Metal compositor.
- */
 /* The batched pad properties */
 typedef struct
 {
@@ -112,6 +107,11 @@ typedef struct
   GstVfMetalCompositorSizingPolicy sizing_policy;
 } GstVfMetalCompositorPadBatch;
 
+/**
+ * GstVfMetalCompositorPad:
+ *
+ * Pad for the Metal compositor.
+ */
 struct _GstVfMetalCompositorPad
 {
   GstVideoAggregatorPad parent;
