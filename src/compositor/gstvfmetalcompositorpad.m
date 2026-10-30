@@ -182,22 +182,45 @@ gst_vf_metal_compositor_pad_dispatch_properties_changed (GObject * object,
     guint n_pspecs, GParamSpec ** pspecs)
 {
   GstVfMetalCompositorPad *pad = GST_VF_METAL_COMPOSITOR_PAD (object);
-  GstElement *element = gst_pad_get_parent_element (GST_PAD (pad));
 
-  /* Element lock, then pad lock: the order GstElement itself takes them */
-  if (element)
-    GST_OBJECT_LOCK (element);
-  GST_OBJECT_LOCK (pad);
-  pad->xpos = pad->pending_xpos;
-  pad->ypos = pad->pending_ypos;
-  pad->width = pad->pending_width;
-  pad->height = pad->pending_height;
-  pad->alpha = pad->pending_alpha;
-  pad->sizing_policy = pad->pending_sizing_policy;
-  GST_OBJECT_UNLOCK (pad);
-  if (element) {
-    GST_OBJECT_UNLOCK (element);
-    gst_object_unref (element);
+  /* Only a batch that wrote one of the six commits: a caps notify or a
+   * controller sync of another property costs no lock */
+  gboolean batched = FALSE;
+  for (guint i = 0; i < n_pspecs; i++) {
+    if (pspecs[i]->owner_type != GST_TYPE_VF_METAL_COMPOSITOR_PAD)
+      continue;
+    switch (pspecs[i]->param_id) {
+      case PROP_PAD_XPOS:
+      case PROP_PAD_YPOS:
+      case PROP_PAD_WIDTH:
+      case PROP_PAD_HEIGHT:
+      case PROP_PAD_ALPHA:
+      case PROP_PAD_SIZING_POLICY:
+        batched = TRUE;
+        break;
+      default:
+        break;
+    }
+  }
+
+  if (batched) {
+    GstElement *element = gst_pad_get_parent_element (GST_PAD (pad));
+
+    /* Element lock, then pad lock: the order GstElement itself takes them */
+    if (element)
+      GST_OBJECT_LOCK (element);
+    GST_OBJECT_LOCK (pad);
+    pad->xpos = pad->pending_xpos;
+    pad->ypos = pad->pending_ypos;
+    pad->width = pad->pending_width;
+    pad->height = pad->pending_height;
+    pad->alpha = pad->pending_alpha;
+    pad->sizing_policy = pad->pending_sizing_policy;
+    GST_OBJECT_UNLOCK (pad);
+    if (element) {
+      GST_OBJECT_UNLOCK (element);
+      gst_object_unref (element);
+    }
   }
 
   G_OBJECT_CLASS (gst_vf_metal_compositor_pad_parent_class)->

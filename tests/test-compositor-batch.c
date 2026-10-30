@@ -49,6 +49,28 @@ is_red (GstBuffer * buf, int x, int y)
   return px[2] > 200 && px[0] < 50 && px[1] < 50;
 }
 
+/* The red channel at (x,y): 255 for an opaque input, about 128 at alpha 0.5. */
+static int
+red_level (GstBuffer * buf, int x, int y)
+{
+  guint8 px[4];
+  gst_buffer_extract (buf, (y * W + x) * 4, px, 4);
+  return px[2];
+}
+
+static void
+check_level (const char *what, GstBuffer * buf, int x, int y, int lo, int hi)
+{
+  int level = buf ? red_level (buf, x, y) : -1;
+  if (level >= lo && level <= hi) {
+    printf ("  PASS  %s: (%d,%d) red %d\n", what, x, y, level);
+  } else {
+    printf ("  FAIL  %s: (%d,%d) red %d, expected %d..%d\n", what, x, y,
+        level, lo, hi);
+    failures++;
+  }
+}
+
 static void
 check (const char *what, GstBuffer * buf, int x, int y, gboolean red)
 {
@@ -82,20 +104,29 @@ main (int argc, char **argv)
   check ("16x16 at 0,0", out, 40, 40, FALSE);
   gst_clear_buffer (&out);
 
-  /* Move to 32,32 and grow to 24x24: the rectangle 32..56. */
+  /* Move to 32,32, grow to 24x24 (the rectangle 32..56) and fade to 0.5. */
   g_object_freeze_notify (G_OBJECT (pad));
   g_object_set (pad, "xpos", 32, "ypos", 32, NULL);
   out = push_red (h);
-  check ("frame between two writes of a batch", out, 8, 8, TRUE);
-  check ("frame between two writes of a batch", out, 40, 40, FALSE);
+  check ("frame after the position writes", out, 8, 8, TRUE);
+  check ("frame after the position writes", out, 40, 40, FALSE);
   gst_clear_buffer (&out);
-  g_object_set (pad, "width", 24, "height", 24, NULL);
+  g_object_set (pad, "width", 24, "height", 24, "alpha", 0.5, NULL);
+  out = push_red (h);
+  check_level ("frame after the size and alpha writes", out, 8, 8, 250, 255);
+  check ("frame after the size and alpha writes", out, 20, 8, FALSE);
+  check ("frame after the size and alpha writes", out, 8, 20, FALSE);
+  check ("frame after the size and alpha writes", out, 40, 40, FALSE);
+  gst_clear_buffer (&out);
   g_object_thaw_notify (G_OBJECT (pad));
 
   out = push_red (h);
   check ("after the batch", out, 8, 8, FALSE);
-  check ("after the batch", out, 52, 52, TRUE);
+  check_level ("after the batch", out, 52, 52, 100, 160);
+  check_level ("after the batch", out, 34, 54, 100, 160);
+  check_level ("after the batch", out, 54, 34, 100, 160);
   gst_clear_buffer (&out);
+  g_object_set (pad, "alpha", 1.0, NULL);
 
   /* A single write is its own batch and applies on the next frame. */
   g_object_set (pad, "xpos", 0, NULL);

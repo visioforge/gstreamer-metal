@@ -112,7 +112,8 @@ struct _GstVfMetalCompositorPad
   GstVfMetalCompositorOperator op;
 
   /* What set_property wrote; dispatch_properties_changed commits it to the
-   * fields above as one batch */
+   * fields above as one batch. zorder and operator are not batched: they
+   * apply at the write */
   gint pending_xpos, pending_ypos;
   gint pending_width, pending_height;
   gdouble pending_alpha;
