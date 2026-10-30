@@ -104,7 +104,9 @@ typedef struct
   gint xpos, ypos;
   gint width, height;
   gdouble alpha;
+  guint zorder;
   GstVfMetalCompositorSizingPolicy sizing_policy;
+  GstVfMetalCompositorOperator op;
 } GstVfMetalCompositorPadBatch;
 
 /**
@@ -128,8 +130,7 @@ struct _GstVfMetalCompositorPad
    * committed as one batch, and each output frame copies committed to the
    * fields above once, after the controller sync
    * (gst_vf_metal_compositor_snapshot_pads), so one frame reads one batch
-   * throughout. zorder and operator are not batched: they apply at the
-   * write */
+   * throughout */
   GstVfMetalCompositorPadBatch pending, committed;
 
   /* Computed offsets for keep-aspect-ratio */
@@ -139,8 +140,8 @@ struct _GstVfMetalCompositorPad
 
 GST_ELEMENT_REGISTER_DECLARE (vfmetalcompositor);
 
-/* Copies every sink pad's committed batch to the fields the frame reads.
- * Call with the element's object lock held, on the aggregator thread */
+/* Copies every sink pad's committed batch to the fields the frame reads and
+ * sorts the sink pads by the committed zorder. Call with the element's object lock held, on the aggregator thread */
 void gst_vf_metal_compositor_snapshot_pads (GstElement * element);
 
 static inline gint

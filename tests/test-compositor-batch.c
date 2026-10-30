@@ -122,6 +122,17 @@ push_blue_i420 (GstHarness * h, GstClockTime at)
   return gst_harness_push (h, in) == GST_FLOW_OK;
 }
 
+/* Pushes one frame on each pad and pulls the output. */
+static GstBuffer *
+push_two (GstHarness * red, GstHarness * blue, GstClockTime * at)
+{
+  GstBuffer *out = NULL;
+  if (push_solid (red, 0, 0, 255, *at) && push_blue_i420 (blue, *at))
+    out = gst_harness_pull (red);
+  *at += GST_SECOND / 30;
+  return out;
+}
+
 /* Two pads: an opaque blue one above a red one, covering it. Every pad of a
  * frame reads one snapshot, so the frame right after the top pad moves away
  * draws the red one too: its obscured check sees the moved rectangle, not
@@ -148,17 +159,25 @@ two_pads (void)
   g_object_set (blue_pad, "zorder", 1, "xpos", 0, "ypos", 0, NULL);
 
   GstClockTime at = 0;
-  GstBuffer *out = NULL;
-  if (push_solid (red, 0, 0, 255, at) && push_blue_i420 (blue, at))
-    out = gst_harness_pull (red);
+  GstBuffer *out = push_two (red, blue, &at);
   check_level ("blue covers red", out, 8, 8, 0, 50);
   gst_clear_buffer (&out);
 
   g_object_set (blue_pad, "xpos", 32, "ypos", 32, NULL);
-  at += GST_SECOND / 30;
-  if (push_solid (red, 0, 0, 255, at) && push_blue_i420 (blue, at))
-    out = gst_harness_pull (red);
+  out = push_two (red, blue, &at);
   check ("frame after the top pad moved", out, 8, 8, TRUE);
+  gst_clear_buffer (&out);
+
+  /* zorder is part of the batch: the stacking changes when it commits */
+  g_object_set (blue_pad, "xpos", 0, "ypos", 0, NULL);
+  g_object_freeze_notify (G_OBJECT (red_pad));
+  g_object_set (red_pad, "zorder", 2, NULL);
+  out = push_two (red, blue, &at);
+  check_level ("frame inside a zorder batch", out, 8, 8, 0, 50);
+  gst_clear_buffer (&out);
+  g_object_thaw_notify (G_OBJECT (red_pad));
+  out = push_two (red, blue, &at);
+  check ("after the zorder batch", out, 8, 8, TRUE);
   gst_clear_buffer (&out);
 
   gst_harness_teardown (blue);
