@@ -432,7 +432,10 @@ _fixate_caps (GstAggregator * agg, GstCaps * caps)
     par_n = par_d = 1;
   }
 
+  /* Negotiation runs before the first aggregate, and the output size
+   * follows the pads' rectangles: take the batches written so far */
   GST_OBJECT_LOCK (vagg);
+  gst_vf_metal_compositor_snapshot_pads (GST_ELEMENT (vagg));
   for (l = GST_ELEMENT (vagg)->sinkpads; l; l = l->next) {
     GstVideoAggregatorPad *vaggpad = l->data;
     GstVfMetalCompositorPad *cpad = GST_VF_METAL_COMPOSITOR_PAD (vaggpad);
@@ -662,6 +665,21 @@ gst_vf_metal_compositor_stop (GstAggregator * agg)
   return GST_AGGREGATOR_CLASS (parent_class)->stop (agg);
 }
 
+/* --- Per-frame snapshot --- */
+
+/* One snapshot of every pad's last committed batch per output frame, so
+ * prepare_frame_start, the background check and aggregate_frames all read
+ * the same rectangles even when a batch commits while the frame is built.
+ * The snapshot itself waits for the first prepare_frame_start: the parent
+ * syncs controlled properties after this and before that */
+static GstFlowReturn
+gst_vf_metal_compositor_aggregate (GstAggregator * agg, gboolean timeout)
+{
+  GST_VF_METAL_COMPOSITOR (agg)->snapshot_pending = TRUE;
+
+  return GST_AGGREGATOR_CLASS (parent_class)->aggregate (agg, timeout);
+}
+
 /* --- Navigation event forwarding --- */
 
 typedef struct
@@ -686,12 +704,15 @@ src_pad_mouse_event (GstElement * element, GstPad * pad, gpointer user_data)
   gst_structure_get (st, "pointer_x", G_TYPE_DOUBLE, &event_x,
       "pointer_y", G_TYPE_DOUBLE, &event_y, NULL);
 
+  /* The aggregator thread snapshots the rectangle under this lock */
+  GST_OBJECT_LOCK (element);
   gst_vf_metal_compositor_pad_get_output_size (comp, cpad,
       GST_VIDEO_INFO_PAR_N (&vagg->info),
       GST_VIDEO_INFO_PAR_D (&vagg->info),
       &(rect.w), &(rect.h), &offset_x, &offset_y);
   rect.x = cpad->xpos + offset_x;
   rect.y = cpad->ypos + offset_y;
+  GST_OBJECT_UNLOCK (element);
 
   if (is_point_contained (rect, event_x, event_y)) {
     GstVideoAggregatorPad *vpad = GST_VIDEO_AGGREGATOR_PAD_CAST (cpad);
@@ -987,6 +1008,7 @@ gst_vf_metal_compositor_class_init (GstVfMetalCompositorClass * klass)
   agg_class->fixate_src_caps = GST_DEBUG_FUNCPTR (_fixate_caps);
   agg_class->negotiated_src_caps = GST_DEBUG_FUNCPTR (_negotiated_caps);
   agg_class->stop = GST_DEBUG_FUNCPTR (gst_vf_metal_compositor_stop);
+  agg_class->aggregate = GST_DEBUG_FUNCPTR (gst_vf_metal_compositor_aggregate);
 
   videoaggregator_class->update_caps =
       GST_DEBUG_FUNCPTR (_update_caps);

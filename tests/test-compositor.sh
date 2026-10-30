@@ -196,6 +196,19 @@ run_pipeline "downstream downscale + format 640x480 -> I420 320x240" \
     videotestsrc num-buffers=5 ! "video/x-raw,format=BGRA,width=640,height=480,framerate=30/1" ! \
     vfmetalcompositor ! "video/x-raw,format=I420,width=320,height=240,framerate=30/1" ! fakesink
 
+# --- 15. A batch of pad writes takes effect together (MediaFrameworkDotnet#3507) ---
+# gst-launch cannot put a frame between two property writes; this harness
+# does. pkg-config has to find gstreamer-check-1.0.
+echo "[Batched pad writes]"
+if [ -d "/Library/Frameworks/GStreamer.framework" ]; then
+    export PKG_CONFIG_PATH="/Library/Frameworks/GStreamer.framework/Libraries/pkgconfig:${PKG_CONFIG_PATH:-}"
+fi
+BATCH_BIN="${BUILD_DIR}/test-compositor-batch"
+run_test "a frame between two writes of a batch keeps the rectangle" \
+    sh -c "cc '${SCRIPT_DIR}/test-compositor-batch.c' -o '${BATCH_BIN}' \
+        \$(pkg-config --cflags --libs gstreamer-check-1.0 gstreamer-controller-1.0 gstreamer-base-1.0 gstreamer-1.0) && \
+        GST_REGISTRY_FORK=no '${BATCH_BIN}'"
+
 # --- Summary ---
 echo ""
 echo "=== Compositor results: ${PASS}/${TOTAL} passed, ${FAIL} failed ==="
