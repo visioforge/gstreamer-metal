@@ -1,0 +1,51 @@
+# Builds the macOS plugin from the pushed tag and attaches it to a GitHub Release. The VisioForge
+# NuGet packaging pins that asset's URL and sha256, so the shipped bytes are the ones built here
+# from this tag - never whatever a build folder on some Mac happened to hold.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-15
+    env:
+      # The GStreamer the VisioForge macOS redist ships; the plugin links against its ABI.
+      GST_VERSION: 1.28.8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the GStreamer framework
+        run: |
+          set -euo pipefail
+          base="https://gstreamer.freedesktop.org/data/pkg/osx/$GST_VERSION"
+          for pkg in "gstreamer-1.0-$GST_VERSION-universal.pkg" "gstreamer-1.0-devel-$GST_VERSION-universal.pkg"; do
+            curl -fsSL -o "$RUNNER_TEMP/$pkg" "$base/$pkg"
+            want="$(curl -fsSL "$base/$pkg.sha256sum" | awk '{print $1; exit}')"
+            [ "$(shasum -a 256 "$RUNNER_TEMP/$pkg" | awk '{print $1}')" = "$want" ] || { echo "sha256 mismatch on $pkg" >&2; exit 1; }
+            sudo installer -pkg "$RUNNER_TEMP/$pkg" -target /
+          done
+          command -v pkg-config >/dev/null || brew install pkgconf
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          export PKG_CONFIG_PATH=/Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig
+          ./build.sh Release
+          [ "$(lipo -archs build/gstvfmetal.dylib)" = "x86_64 arm64" ] || { echo "not universal: $(lipo -archs build/gstvfmetal.dylib)" >&2; exit 1; }
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha="$(shasum -a 256 build/gstvfmetal.dylib | awk '{print $1}')"
+          gh release create "$GITHUB_REF_NAME" build/gstvfmetal.dylib --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes "macOS universal plugin built from $GITHUB_SHA against GStreamer $GST_VERSION.
+
+          gstvfmetal.dylib sha256: $sha"

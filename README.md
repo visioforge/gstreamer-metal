@@ -62,6 +62,10 @@ Metal-accelerated video processing plugin for GStreamer on macOS and iOS. Provid
 
 The build produces `build/gstvfmetal.dylib` (macOS), `build-maccatalyst/gstvfmetal.dylib` (Mac Catalyst) or `build-ios/gstvfmetal.a` (iOS).
 
+### Releases
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`: it builds the universal macOS `gstvfmetal.dylib` from that tag against the official GStreamer framework and attaches it, with its sha256 in the notes, to a GitHub Release. The VisioForge NuGet packaging pins that asset's URL and sha256 instead of copying a local build.
+
 ## iOS Static Registration
 
 For iOS apps using a static GStreamer build:
